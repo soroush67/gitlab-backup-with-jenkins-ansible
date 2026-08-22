@@ -1,0 +1,177 @@
+---
+- name: Assert gitlab_backup_run_dir is set and has a manifest
+  assert:
+    that:
+      - gitlab_backup_run_dir | length > 0
+      - (gitlab_backup_run_dir ~ '/manifest.json') is file
+    msg: "gitlab_backup_run_dir must point at a directory containing manifest.json (produced by roles/gitlab_backup)."
+
+- name: Read the backup manifest
+  set_fact:
+    gitlab_manifest: "{{ lookup('file', gitlab_backup_run_dir ~ '/manifest.json') | from_json }}"
+
+- block:
+    - name: Bring up the disposable restore GitLab container
+      command: "docker-compose -f {{ gitlab_restore_compose_file }} up -d"
+      args:
+        chdir: "{{ gitlab_restore_project_dir }}"
+
+    - name: Wait for the restore GitLab instance to become ready
+      # NOT curling gitlab_restore_url from the host: GitLab's health-check
+      # endpoints are IP-allowlisted (gitlab_rails['monitoring_whitelist'],
+      # default 127.0.0.0/8), and a curl against the published port from the
+      # host arrives at nginx post-Docker-NAT, not as 127.0.0.1 - confirmed
+      # directly (curl from the host got a real 404 while `docker exec ...
+      # curl` and the compose file's own healthcheck, both running inside
+      # the container's network namespace, got 200 at the very same moment).
+      # Polling Docker's own healthcheck status sidesteps this entirely.
+      command: docker inspect --format "{{ '{{' }}.State.Health.Status{{ '}}' }}" {{ gitlab_restore_container }}
+      register: gitlab_restore_ready
+      until: gitlab_restore_ready.stdout == "healthy"
+      retries: "{{ gitlab_restore_ready_retries }}"
+      delay: "{{ gitlab_restore_ready_delay }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Create an admin API token on the restore instance
+      # Idempotent on purpose: gitlab_restore_teardown: false leaves this
+      # container running for debugging, and a second run against the same
+      # instance would otherwise hit a real PG::UniqueViolation on
+      # index_personal_access_tokens_on_token_digest (hit directly, from a
+      # container reused across manual testing) since the token value is a
+      # fixed string, not generated fresh each run. Delete-then-create makes
+      # re-running against an already-provisioned instance safe.
+      command: >-
+        docker exec {{ gitlab_restore_container }} gitlab-rails runner
+        "u = User.find_by_username('root'); u.personal_access_tokens.where(name: 'restore-verify').delete_all; token = u.personal_access_tokens.create(scopes: ['api'], name: 'restore-verify', expires_at: 1.day.from_now); token.set_token('{{ gitlab_restore_token }}'); token.save!; puts 'TOKEN_OK'"
+      register: gitlab_restore_token_result
+      changed_when: false
+      failed_when: "'TOKEN_OK' not in gitlab_restore_token_result.stdout"
+
+    - name: Enable the gitlab_project import source on the restore instance
+      # A fresh GitLab instance ships with `import_sources` EMPTY - confirmed
+      # directly (ApplicationSetting.current.import_sources == []) after
+      # POST .../projects/import returned a bare, detail-free 403 Forbidden
+      # (Grape's generic authorize! rejection, not a validation error or a
+      # rate limit) for every project. Enabling "gitlab_project" here is
+      # scoped to this disposable, throwaway instance only - never touches
+      # the real source GitLab.
+      command: >-
+        docker exec {{ gitlab_restore_container }} gitlab-rails runner
+        "s = ApplicationSetting.current; s.update!(import_sources: (s.import_sources + ['gitlab_project']).uniq); puts 'IMPORT_SOURCE_OK'"
+      register: gitlab_restore_import_source_result
+      changed_when: false
+      failed_when: "'IMPORT_SOURCE_OK' not in gitlab_restore_import_source_result.stdout"
+
+    - name: Import each backed-up project into the disposable restore instance
+      # NOT the uri module: confirmed directly (a same-file, side-by-side
+      # comparison) that ansible.builtin.uri's body_format=form-multipart
+      # corrupts this binary .tar.gz in transit - curl succeeded every time
+      # on the identical file/request, the uri module failed identically
+      # every time with GitLab's internal unpack reporting "gzip: stdin: not
+      # in gzip format". Shelling out to curl matches the proven-working path
+      # exactly. Also retries on 429 - the same rate limit GitLab applies to
+      # project-export applies to project-import too (confirmed: 429
+      # "requested too many times" on projects 7-10 after the first 6
+      # succeeded in rapid succession).
+      command: >-
+        curl -s -X POST {{ gitlab_restore_url }}/api/v4/projects/import
+        --header "PRIVATE-TOKEN: {{ gitlab_restore_token }}"
+        --form "path={{ item.path }}"
+        --form "name={{ item.name }}"
+        --form "file=@{{ gitlab_backup_run_dir }}/{{ item.id }}__{{ item.path | regex_replace('[^A-Za-z0-9_.-]', '_') }}.tar.gz"
+        -w "\nHTTPSTATUS:%{http_code}"
+      register: gitlab_import_start_raw
+      until: gitlab_import_start_raw.stdout is search('HTTPSTATUS:201')
+      retries: "{{ gitlab_import_start_retries }}"
+      delay: "{{ gitlab_import_start_delay }}"
+      loop: "{{ gitlab_manifest }}"
+      loop_control:
+        label: "{{ item.path_with_namespace }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Parse import-start responses
+      set_fact:
+        gitlab_import_start: "{{ gitlab_import_start | default([]) + [{
+          'failed': (item.stdout is not search('HTTPSTATUS:201')),
+          'json': (item.stdout.split('\nHTTPSTATUS:')[0] | from_json) if (item.stdout is search('HTTPSTATUS:201')) else {},
+          } ] }}"
+      loop: "{{ gitlab_import_start_raw.results }}"
+      loop_control:
+        label: "{{ item.item.path_with_namespace }}"
+
+    - name: Wait for each import to finish
+      uri:
+        url: "{{ gitlab_restore_url }}/api/v4/projects/{{ gitlab_import_start[idx].json.id }}/import"
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_restore_token }}"
+        return_content: true
+      register: gitlab_import_status
+      until: gitlab_import_status.json.import_status == 'finished'
+      retries: "{{ gitlab_import_poll_retries }}"
+      delay: "{{ gitlab_import_poll_delay }}"
+      loop: "{{ gitlab_manifest }}"
+      loop_control:
+        index_var: idx
+        label: "{{ item.path_with_namespace }}"
+      when: not (gitlab_import_start[idx].failed | default(false))
+      ignore_errors: true
+
+    - name: Verify each imported project's repository actually has commits
+      uri:
+        url: "{{ gitlab_restore_url }}/api/v4/projects/{{ gitlab_import_start[idx].json.id }}/repository/branches"
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_restore_token }}"
+        return_content: true
+      register: gitlab_branch_check
+      loop: "{{ gitlab_manifest }}"
+      loop_control:
+        index_var: idx
+        label: "{{ item.path_with_namespace }}"
+      when: not (gitlab_import_start[idx].failed | default(false))
+      ignore_errors: true
+
+    - name: Build a pass/fail summary per project
+      set_fact:
+        gitlab_verify_summary: "{{ gitlab_verify_summary | default([]) + [{
+          'project': item.0.path_with_namespace,
+          'import_ok': not (item.1.failed | default(false)) and not (item.2.failed | default(false)),
+          'has_branches': (item.3.json | default([]) | length > 0) and not (item.3.failed | default(false)),
+          } ] }}"
+      loop: "{{ gitlab_manifest | zip(gitlab_import_start, gitlab_import_status.results, gitlab_branch_check.results) | list }}"
+      loop_control:
+        label: "{{ item.0.path_with_namespace }}"
+
+    - name: Show verification summary
+      debug:
+        var: gitlab_verify_summary
+
+    - name: Assert each project restored with real repository content
+      assert:
+        that:
+          - item.import_ok
+          - item.has_branches
+        fail_msg: "Restore verification FAILED for {{ item.project }}"
+        success_msg: "Restore verification passed for {{ item.project }}"
+      loop: "{{ gitlab_verify_summary }}"
+      loop_control:
+        label: "{{ item.project }}"
+      register: gitlab_per_project_assert
+      ignore_errors: true
+
+    - name: Final combined restore-verification result
+      assert:
+        that: (gitlab_per_project_assert.results | selectattr('failed', 'equalto', true) | list | length) == 0
+        fail_msg: >-
+          RESTORE VERIFICATION FAILED -
+          {{ gitlab_per_project_assert.results | selectattr('failed', 'equalto', true) | list | length }}
+          of {{ gitlab_verify_summary | length }} project(s) failed to restore correctly. See task output above for which ones.
+        success_msg: "RESTORE VERIFICATION PASSED - all {{ gitlab_verify_summary | length }} project(s) restored correctly."
+
+  always:
+    - name: Tear down the disposable restore GitLab container
+      command: "docker-compose -f {{ gitlab_restore_compose_file }} down -v"
+      args:
+        chdir: "{{ gitlab_restore_project_dir }}"
+      when: gitlab_restore_teardown | bool

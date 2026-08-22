@@ -1,0 +1,29 @@
+services:
+  gitlab-source:
+    image: gitlab/gitlab-ce:17.10.5-ce.0
+    container_name: gitlab-source
+    hostname: gitlab-source.local
+    restart: unless-stopped
+    shm_size: "256m"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab-source.local:8929'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2224
+        # This is a throwaway backup-source/testbed instance, not a real
+        # team GitLab - trade memory for a smaller footprint.
+        puma['worker_processes'] = 2
+        prometheus_monitoring['enable'] = false
+        gitlab_rails['gitlab_default_theme'] = 2
+    ports:
+      - "8929:8929"
+      - "2224:22"
+    volumes:
+      - ./gitlab-source-config:/etc/gitlab
+      - ./gitlab-source-logs:/var/log/gitlab
+      - ./gitlab-source-data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8929/-/readiness"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 5m

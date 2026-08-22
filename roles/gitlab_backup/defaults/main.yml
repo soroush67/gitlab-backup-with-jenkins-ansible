@@ -1,0 +1,21 @@
+---
+# The GitLab instance being backed up. Point this at the real self-hosted
+# GitLab when there is one - defaults to the throwaway `gitlab-source`
+# container this project ships for development/testing (see
+# docker-compose.gitlab-source.yml).
+gitlab_url: "http://localhost:8929"
+gitlab_token: ""
+
+gitlab_backup_dir: "{{ playbook_dir }}/../backups"
+# Set by the playbook per-run (timestamped subdirectory) - overridable so
+# backup_and_verify.yml can point the verify role at exactly what backup.yml
+# just produced.
+gitlab_backup_run_dir: "{{ gitlab_backup_dir }}/{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+
+gitlab_export_poll_retries: 30
+gitlab_export_poll_delay: 10
+
+# GitLab throttles POST .../export fairly aggressively - retry-with-backoff
+# settings for starting each export (separate from polling its completion).
+gitlab_export_start_retries: 12
+gitlab_export_start_delay: 8

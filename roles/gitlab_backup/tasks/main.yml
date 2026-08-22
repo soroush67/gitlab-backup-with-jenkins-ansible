@@ -1,0 +1,112 @@
+---
+- name: Assert gitlab_token is set
+  assert:
+    that: gitlab_token | length > 0
+    msg: "gitlab_token must be set (-e gitlab_token=... or a Jenkins credential binding)."
+
+- name: Pin this run's backup directory as a real fact
+  # Not just a role default - if backup_and_verify.yml runs this role and
+  # gitlab_restore_test afterward, that second role's own (empty-string)
+  # default for the same variable name would otherwise win, since both are
+  # "role defaults" precedence and the later-loaded role's default applies.
+  # set_fact outranks role defaults and survives for the rest of the play.
+  set_fact:
+    gitlab_backup_run_dir: "{{ gitlab_backup_run_dir }}"
+
+- name: List projects - page 1 (also tells us the total page count)
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects?membership=true&simple=true&per_page=100&page=1&order_by=id&sort=asc"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    return_content: true
+  register: gitlab_projects_page1
+
+- name: Set fact - total pages and accumulated project list
+  set_fact:
+    gitlab_total_pages: "{{ gitlab_projects_page1.headers['x-total-pages'] | default('1') | int }}"
+    gitlab_all_projects: "{{ gitlab_projects_page1.json }}"
+
+- name: List projects - remaining pages
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects?membership=true&simple=true&per_page=100&page={{ item }}&order_by=id&sort=asc"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    return_content: true
+  register: gitlab_projects_rest
+  loop: "{{ range(2, gitlab_total_pages + 1) | list }}"
+  loop_control:
+    label: "page {{ item }}"
+  when: gitlab_total_pages > 1
+
+- name: Append remaining pages to the project list
+  set_fact:
+    gitlab_all_projects: "{{ gitlab_all_projects + (gitlab_projects_rest.results | map(attribute='json') | list | flatten(1)) }}"
+  when: gitlab_total_pages > 1
+
+- name: Report how many projects were found
+  debug:
+    msg: "Found {{ gitlab_all_projects | length }} project(s) on {{ gitlab_url }}"
+
+- name: Fail cleanly if there is nothing to back up
+  assert:
+    that: gitlab_all_projects | length > 0
+    msg: "No projects found on {{ gitlab_url }} - nothing to back up. Check gitlab_url/gitlab_token."
+
+- name: Ensure this run's backup directory exists
+  file:
+    path: "{{ gitlab_backup_run_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Start an export for every project
+  # GitLab throttles the project-export endpoint fairly aggressively (hit a
+  # real 429 "requested too many times" after ~6 rapid calls in testing) -
+  # retry on 429 with backoff instead of treating it as a hard failure.
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export"
+    method: POST
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    status_code: [202, 429]
+  register: gitlab_export_start
+  until: gitlab_export_start.status == 202
+  retries: "{{ gitlab_export_start_retries }}"
+  delay: "{{ gitlab_export_start_delay }}"
+  loop: "{{ gitlab_all_projects }}"
+  loop_control:
+    label: "{{ item.path_with_namespace }}"
+
+- name: Wait for every export to finish
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    return_content: true
+  register: gitlab_export_status
+  until: gitlab_export_status.json.export_status == 'finished'
+  retries: "{{ gitlab_export_poll_retries }}"
+  delay: "{{ gitlab_export_poll_delay }}"
+  loop: "{{ gitlab_all_projects }}"
+  loop_control:
+    label: "{{ item.path_with_namespace }}"
+
+- name: Download every finished export archive
+  get_url:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export/download"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    dest: "{{ gitlab_backup_run_dir }}/{{ item.id }}__{{ item.path | regex_replace('[^A-Za-z0-9_.-]', '_') }}.tar.gz"
+    mode: "0640"
+  loop: "{{ gitlab_all_projects }}"
+  loop_control:
+    label: "{{ item.path_with_namespace }}"
+
+- name: Write a manifest of what was backed up (drives the restore-verify role)
+  copy:
+    content: "{{ gitlab_all_projects | to_nice_json }}\n"
+    dest: "{{ gitlab_backup_run_dir }}/manifest.json"
+    mode: "0640"
+
+- name: Backup complete
+  debug:
+    msg: "Backed up {{ gitlab_all_projects | length }} project(s) to {{ gitlab_backup_run_dir }}"

@@ -1,0 +1,27 @@
+services:
+  gitlab-restore:
+    image: gitlab/gitlab-ce:17.10.5-ce.0
+    container_name: gitlab-restore
+    hostname: gitlab-restore.local
+    restart: "no"
+    shm_size: "256m"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab-restore.local:8930'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2225
+        # Disposable per-run restore-verification target. It only ever
+        # exists for the lifetime of one backup_and_verify.yml run, then
+        # gets torn down (docker-compose down -v) - deliberately not a
+        # persistent volume mount, so `down -v` leaves nothing behind.
+        puma['worker_processes'] = 2
+        prometheus_monitoring['enable'] = false
+        gitlab_rails['gitlab_default_theme'] = 2
+    ports:
+      - "8930:8930"
+      - "2225:22"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8930/-/readiness"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 3m

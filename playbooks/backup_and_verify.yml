@@ -1,0 +1,11 @@
+---
+# Backup every project, then prove each backup is actually restorable by
+# importing it into a disposable throwaway GitLab CE container
+# (docker-compose.gitlab-restore.yml) and checking the restored project
+# really has its repository content - not just that the archive file
+# exists. This is what Jenkins should run on a schedule.
+- hosts: local
+  gather_facts: true
+  roles:
+    - gitlab_backup
+    - gitlab_restore_test

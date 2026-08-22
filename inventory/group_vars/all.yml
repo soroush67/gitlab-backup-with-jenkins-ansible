@@ -1,0 +1,8 @@
+---
+# gitlab_url / gitlab_token are the real source GitLab this backs up.
+# Defaults point at this project's own throwaway `gitlab-source` container
+# (docker-compose.gitlab-source.yml) for development/testing.
+gitlab_url: "http://localhost:8929"
+# Never commit a real token - pass via -e gitlab_token=... or a Jenkins
+# credential binding (see infra-GitlabBackup.groovy).
+gitlab_token: "{{ lookup('env', 'GITLAB_TOKEN') | default('', true) }}"

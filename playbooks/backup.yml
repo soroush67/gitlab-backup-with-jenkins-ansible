@@ -1,0 +1,9 @@
+---
+# Backup only - exports every project this token can see from gitlab_url
+# and downloads the archives + a manifest.json into backups/<timestamp>/.
+# Does NOT verify the backups are actually restorable - see
+# backup_and_verify.yml for that.
+- hosts: local
+  gather_facts: true
+  roles:
+    - gitlab_backup

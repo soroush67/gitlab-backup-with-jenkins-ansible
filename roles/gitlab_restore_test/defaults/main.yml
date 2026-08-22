@@ -1,0 +1,30 @@
+---
+# The manifest.json + archive files written by roles/gitlab_backup - set by
+# the calling playbook to point at whatever backup.yml just produced.
+gitlab_backup_run_dir: ""
+
+gitlab_restore_project_dir: "{{ playbook_dir }}/.."
+gitlab_restore_compose_file: "docker-compose.gitlab-restore.yml"
+gitlab_restore_container: gitlab-restore
+gitlab_restore_url: "http://localhost:8930"
+gitlab_restore_token: "glpat-restoreverifytoken0123456789"
+
+# A fresh container (post `docker-compose down -v`) is a genuine first
+# boot - observed taking close to 15 minutes on this host under load once.
+# 100*15s = 25 minutes of headroom; this only runs on a schedule, so extra
+# wait time here is cheap compared to a false failure.
+gitlab_restore_ready_retries: 100
+gitlab_restore_ready_delay: 15
+
+gitlab_import_poll_retries: 30
+gitlab_import_poll_delay: 10
+
+# GitLab throttles POST .../projects/import the same way it throttles
+# project-export - retry-with-backoff settings for starting each import.
+gitlab_import_start_retries: 12
+gitlab_import_start_delay: 8
+
+# Tear the disposable restore container down (docker-compose down -v) once
+# verification finishes. Set false to leave it up for manual inspection
+# after a failed run.
+gitlab_restore_teardown: true
