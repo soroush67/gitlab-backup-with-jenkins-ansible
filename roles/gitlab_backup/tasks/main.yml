@@ -13,9 +13,40 @@
   set_fact:
     gitlab_backup_run_dir: "{{ gitlab_backup_run_dir }}"
 
+- name: Check the token's own identity (used for a clearer error if it lacks admin access)
+  uri:
+    url: "{{ gitlab_url }}/api/v4/user"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    return_content: true
+  register: gitlab_token_identity
+
+- name: Report the token's identity and admin status
+  debug:
+    msg: >-
+      Authenticated as {{ gitlab_token_identity.json.username }}
+      (admin: {{ gitlab_token_identity.json.is_admin | default(false) }})
+
+- name: Warn if the token is not an admin token
+  # NOT membership=true: that only lists projects the token's own user is a
+  # *member* of, which silently under-lists (down to 0, hit for real against
+  # a genuine multi-project GitLab instance in production) unless that user
+  # happens to be a member of every single project. Backing up "every
+  # project" inherently needs an admin token - GitLab's API special-cases
+  # admin tokens on GET /api/v4/projects (no membership filter) to return
+  # every project on the instance, not just ones the token's user belongs to.
+  debug:
+    msg: >-
+      WARNING: gitlab_token does not belong to an administrator.
+      GET /api/v4/projects without a membership filter only returns
+      projects this token can see, not every project on the instance -
+      backups may be incomplete. Use an admin Personal Access Token to
+      guarantee every project gets backed up.
+  when: not (gitlab_token_identity.json.is_admin | default(false))
+
 - name: List projects - page 1 (also tells us the total page count)
   uri:
-    url: "{{ gitlab_url }}/api/v4/projects?membership=true&simple=true&per_page=100&page=1&order_by=id&sort=asc"
+    url: "{{ gitlab_url }}/api/v4/projects?simple=true&per_page=100&page=1&order_by=id&sort=asc"
     headers:
       PRIVATE-TOKEN: "{{ gitlab_token }}"
     return_content: true
@@ -28,7 +59,7 @@
 
 - name: List projects - remaining pages
   uri:
-    url: "{{ gitlab_url }}/api/v4/projects?membership=true&simple=true&per_page=100&page={{ item }}&order_by=id&sort=asc"
+    url: "{{ gitlab_url }}/api/v4/projects?simple=true&per_page=100&page={{ item }}&order_by=id&sort=asc"
     headers:
       PRIVATE-TOKEN: "{{ gitlab_token }}"
     return_content: true
@@ -50,7 +81,14 @@
 - name: Fail cleanly if there is nothing to back up
   assert:
     that: gitlab_all_projects | length > 0
-    msg: "No projects found on {{ gitlab_url }} - nothing to back up. Check gitlab_url/gitlab_token."
+    msg: >-
+      No projects found on {{ gitlab_url }} - nothing to back up.
+      {% if not (gitlab_token_identity.json.is_admin | default(false)) %}
+      gitlab_token is not an admin token and can't see any project on this
+      instance - use an admin Personal Access Token.
+      {% else %}
+      Check gitlab_url/gitlab_token, or this instance genuinely has no projects yet.
+      {% endif %}
 
 - name: Ensure this run's backup directory exists
   file:

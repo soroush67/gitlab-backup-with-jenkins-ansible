@@ -28,12 +28,20 @@ backups/<timestamp>/               - one directory per run: *.tar.gz exports + m
 
 ## Requirements
 
-- `ansible-core` with the `uri`/`get_url` modules' multipart (`body_format:
-  form-multipart`) support (ansible-core >= 2.10).
 - `docker` + `docker-compose` (standalone binary) on whatever host runs
   this - only needed for `gitlab_restore_test`'s disposable container, not
   for `backup.yml` alone.
-- A GitLab Personal Access Token with `api` scope for the source instance.
+- `curl` on the Ansible controller (used directly for the restore
+  import - see "Design notes").
+- **An admin Personal Access Token (`api` scope) for the source GitLab
+  instance.** Not just any token: `roles/gitlab_backup` lists every
+  project via `GET /api/v4/projects` with no membership filter, which
+  GitLab only expands to "every project on the instance" for an
+  administrator - a non-admin token only sees what it already has access
+  to, silently backing up fewer projects (down to zero, hit for real
+  against a genuine multi-project instance) with no error unless you
+  check the count. The role checks the token's admin status up front and
+  fails with a clear message if it isn't one.
 
 ## Usage
 
@@ -88,10 +96,30 @@ real repository content (an actual branch + commit, not just
 `import_status: finished`) for all 10 -
 `RESTORE VERIFICATION PASSED - all 10 project(s) restored correctly.`,
 `failed=0` in the play recap, disposable container torn down cleanly
-afterward. Five real bugs were found and fixed getting there - see
-"Design notes" below for what they were and why each fix works.
+afterward. Six real bugs were found and fixed getting there (five during
+initial development, one more - the `membership=true` project-listing bug
+below - when the pipeline first ran against a real multi-project instance)
+- see "Design notes" below for what they were and why each fix works.
 
 ## Design notes
+
+**Project listing requires an admin token - `membership=true` silently
+under-lists**: the first real production run (against a genuine
+multi-project self-hosted instance, via Jenkins) reported "Found 0
+project(s)" and failed cleanly, even though the instance had real
+projects and the token/URL were both correct. Root cause: the original
+`GET /api/v4/projects?membership=true&...` only lists projects the
+*token's own user* is a member of - on the throwaway dev/test instance
+this went unnoticed because `root` had created (and was therefore a
+member/owner of) every test project itself, but on a real instance an
+admin token's user is very likely not a member of most projects. Fixed by
+dropping `membership=true` entirely: GitLab's API special-cases admin
+tokens on `GET /api/v4/projects` (no membership filter) to return every
+project on the instance. The role now also checks `GET /api/v4/user` up
+front and fails with a clear "token is not an admin token" message
+instead of a confusing "0 projects found" if the token lacks admin
+rights - reproduced directly with a real non-admin token/user created for
+the purpose, confirmed against the throwaway source instance.
 
 **Why GitLab's Project Export API, not `git clone --mirror`**: a mirror
 clone only captures git refs - it misses issues, merge requests, wiki,
