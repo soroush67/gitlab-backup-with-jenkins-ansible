@@ -30,7 +30,14 @@ backups/<timestamp>/               - one directory per run: *.tar.gz exports + m
 
 - `docker` + `docker-compose` (standalone binary) on whatever host runs
   this - only needed for `gitlab_restore_test`'s disposable container, not
-  for `backup.yml` alone.
+  for `backup.yml` alone. **The OS user running the playbook must be in
+  the `docker` group** (`sudo usermod -aG docker <user>`, then restart
+  whatever process runs the playbook - for a Jenkins agent, that means
+  restarting the agent itself, since group membership only applies to new
+  sessions). Hit for real on a Jenkins agent whose user wasn't in that
+  group - `roles/gitlab_restore_test` now checks `docker info` up front
+  and fails with this exact fix instead of a raw "permission denied"
+  buried in a docker-compose command's stderr.
 - `curl` on the Ansible controller (used directly for the restore
   import - see "Design notes").
 - **An admin Personal Access Token (`api` scope) for the source GitLab

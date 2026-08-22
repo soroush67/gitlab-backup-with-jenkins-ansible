@@ -10,6 +10,30 @@
   set_fact:
     gitlab_manifest: "{{ lookup('file', gitlab_backup_run_dir ~ '/manifest.json') | from_json }}"
 
+- name: Check this user can actually talk to the Docker daemon
+  # Hit for real on a Jenkins agent (inbound-ssh) whose OS user wasn't in
+  # the `docker` group - docker-compose failed with "permission denied
+  # while trying to connect to the Docker daemon socket", both bringing
+  # the container up AND (worse) in the `always:` teardown block, since
+  # that failed too. Check this explicitly up front with a clear, actionable
+  # message instead of letting a permission-denied surface deep inside a
+  # docker-compose command's raw stderr on both the up and the teardown.
+  command: docker info
+  register: gitlab_docker_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail cleanly if the Docker daemon isn't reachable
+  assert:
+    that: gitlab_docker_check.rc == 0
+    msg: >-
+      Can't talk to the Docker daemon (docker info failed): {{ gitlab_docker_check.stderr }}
+      This usually means the user running this playbook isn't in the `docker`
+      group on this host. Fix: `sudo usermod -aG docker $(whoami)`, then
+      restart whatever process runs this playbook (a Jenkins agent included -
+      group membership only applies to new sessions/processes, not the
+      currently running one).
+
 - block:
     - name: Bring up the disposable restore GitLab container
       command: "docker-compose -f {{ gitlab_restore_compose_file }} up -d"
