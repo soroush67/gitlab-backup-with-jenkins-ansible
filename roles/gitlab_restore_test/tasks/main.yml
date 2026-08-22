@@ -34,6 +34,23 @@
       group membership only applies to new sessions/processes, not the
       currently running one).
 
+- name: Tear down any leftover restore instance from a previous run first
+  # gitlab_restore_teardown only controls what happens to THIS run's own
+  # instance afterward - it must never affect whether a PREVIOUS run's
+  # instance (left running via gitlab_restore_teardown=false /
+  # KEEP_RESTORE_FOR_INSPECTION) gets reused. Hit for real: a prior run left
+  # the container up with real projects already imported into it; this
+  # run's "docker-compose up -d" silently reused that same live container
+  # (already-running = no-op) instead of a fresh one, and re-importing
+  # into an instance that already had same-named projects failed with a
+  # path conflict on every retry - reported as a restore failure even
+  # though the actual backup was fine. Always start genuinely fresh.
+  command: "docker-compose -f {{ gitlab_restore_compose_file }} down -v"
+  args:
+    chdir: "{{ gitlab_restore_project_dir }}"
+  changed_when: true
+  failed_when: false
+
 - block:
     - name: Bring up the disposable restore GitLab container
       command: "docker-compose -f {{ gitlab_restore_compose_file }} up -d"
@@ -87,6 +104,24 @@
       changed_when: false
       failed_when: "'IMPORT_SOURCE_OK' not in gitlab_restore_import_source_result.stdout"
 
+    - name: Determine which group namespaces need recreating (including nested)
+      # Without this, every import lands under root's own personal
+      # namespace regardless of the source's group structure - reported
+      # directly ("namespace‌ها درست نیست"): a source with devops/p1 and
+      # dev/bb1 came back as Administrator/p1 and Administrator/bb1 on the
+      # restore instance. Handles arbitrarily nested groups (a/b/c) - each
+      # level created in order with the correct parent_id, via
+      # create_group_namespace.yml/ensure_group_segment.yml below.
+      set_fact:
+        gitlab_restore_group_namespaces: "{{ gitlab_manifest | selectattr('namespace.kind', 'equalto', 'group') | map(attribute='namespace.full_path') | unique | list }}"
+
+    - name: Create group namespaces on the restore instance, parents first
+      include_tasks: create_group_namespace.yml
+      loop: "{{ gitlab_restore_group_namespaces }}"
+      loop_control:
+        loop_var: gitlab_ns
+        label: "{{ gitlab_ns }}"
+
     - name: Import each backed-up project into the disposable restore instance
       # NOT the uri module: confirmed directly (a same-file, side-by-side
       # comparison) that ansible.builtin.uri's body_format=form-multipart
@@ -97,12 +132,17 @@
       # exactly. Also retries on 429 - the same rate limit GitLab applies to
       # project-export applies to project-import too (confirmed: 429
       # "requested too many times" on projects 7-10 after the first 6
-      # succeeded in rapid succession).
+      # succeeded in rapid succession). Passes namespace only for
+      # group-owned projects - a user-owned project (namespace.kind ==
+      # 'user') always imports into root's own personal namespace, same as
+      # before, since GitLab's import API has no concept of "recreate this
+      # other user's account."
       command: >-
         curl -s -X POST {{ gitlab_restore_url }}/api/v4/projects/import
         --header "PRIVATE-TOKEN: {{ gitlab_restore_token }}"
         --form "path={{ item.path }}"
         --form "name={{ item.name }}"
+        {% if item.namespace.kind == 'group' %}--form "namespace={{ item.namespace.full_path }}"{% endif %}
         --form "file=@{{ gitlab_backup_run_dir }}/{{ item.id }}__{{ item.path | regex_replace('[^A-Za-z0-9_.-]', '_') }}.tar.gz"
         -w "\nHTTPSTATUS:%{http_code}"
       register: gitlab_import_start_raw

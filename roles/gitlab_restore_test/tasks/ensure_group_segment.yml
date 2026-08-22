@@ -1,0 +1,44 @@
+---
+- name: Compute this segment's path, name, and parent path
+  set_fact:
+    gitlab_ns_segment_path: "{{ gitlab_ns_segments[:gitlab_ns_depth] | join('/') }}"
+    gitlab_ns_segment_name: "{{ gitlab_ns_segments[gitlab_ns_depth - 1] }}"
+    gitlab_ns_parent_path: "{{ gitlab_ns_segments[:gitlab_ns_depth - 1] | join('/') }}"
+
+- name: "Skip if this segment was already created/looked up by an earlier namespace"
+  set_fact:
+    gitlab_ns_already_known: "{{ gitlab_ns_segment_path in (gitlab_created_groups | default({})) }}"
+
+- name: "Check if group {{ gitlab_ns_segment_path }} already exists"
+  uri:
+    url: "{{ gitlab_restore_url }}/api/v4/groups/{{ gitlab_ns_segment_path | urlencode }}"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_restore_token }}"
+    status_code: [200, 404]
+  register: gitlab_ns_segment_check
+  when: not gitlab_ns_already_known
+
+- name: "Create group {{ gitlab_ns_segment_path }} (doesn't exist yet)"
+  uri:
+    url: "{{ gitlab_restore_url }}/api/v4/groups"
+    method: POST
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_restore_token }}"
+    body_format: json
+    body: >-
+      {{
+        {'name': gitlab_ns_segment_name, 'path': gitlab_ns_segment_name, 'visibility': 'private'}
+        | combine({'parent_id': gitlab_created_groups[gitlab_ns_parent_path]} if gitlab_ns_parent_path else {})
+      }}
+    status_code: [201]
+  register: gitlab_ns_segment_create
+  when:
+    - not gitlab_ns_already_known
+    - gitlab_ns_segment_check.status == 404
+
+- name: "Record {{ gitlab_ns_segment_path }}'s group ID for later segments/imports to reference"
+  set_fact:
+    gitlab_created_groups: "{{ gitlab_created_groups | default({}) | combine({
+      gitlab_ns_segment_path: (gitlab_ns_segment_create.json.id if gitlab_ns_segment_check.status == 404 else gitlab_ns_segment_check.json.id)
+      }) }}"
+  when: not gitlab_ns_already_known

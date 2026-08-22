@@ -193,6 +193,48 @@ restore-verify).
 
 ## Design notes
 
+**A stale restore instance from a previous `gitlab_restore_teardown: false`
+run could get silently reused**: hit for real via the actual Jenkins
+pipeline - a prior run left the disposable restore container running with
+real projects already imported into it (`KEEP_RESTORE_FOR_INSPECTION`),
+and this run's `docker-compose up -d` treated the already-running
+container as a no-op instead of a fresh one. Re-importing into an instance
+that already had same-named projects hit a path conflict on every one of
+12 retries per project, reported as "RESTORE VERIFICATION FAILED" even
+though the actual backup was perfectly fine - the failure was about
+reusing stale state, not about the backup's validity. Fixed by
+unconditionally tearing down any leftover instance at the *start* of every
+run, before bringing up a new one - `gitlab_restore_teardown` now only
+ever controls what happens to *this* run's own instance afterward, never
+whether a previous run's leftover state gets reused. Reproduced and
+confirmed directly: left an 11-project instance running, ran again, and
+confirmed the teardown task reported `changed: true` and the container
+needed a genuine fresh boot cycle (not an instant reuse) before importing
+cleanly.
+
+**Group/namespace structure is recreated on the restore instance, including
+nested subgroups**: without this, every import landed under `root`'s own
+personal namespace regardless of the source's actual group structure -
+reported directly with a real example (`devops/p1` and `dev/bb1` on the
+source both came back as `Administrator/p1` and `Administrator/bb1` on the
+restore instance). `roles/gitlab_restore_test`'s
+`create_group_namespace.yml`/`ensure_group_segment.yml` walk each group
+namespace one path segment at a time (`a`, then `a/b`, then `a/b/c`),
+creating whichever segments don't already exist yet with the correct
+`parent_id` chained from the segment above - a `gitlab_created_groups`
+(path → id) fact persists across the whole walk so a parent shared by
+multiple projects (e.g. `a` used by both `a/b` and `a/c`) is only ever
+created once. User-owned projects (`namespace.kind == 'user'`) are left
+alone - they always import into root's own personal namespace, since
+GitLab's import API has no concept of recreating another user's account.
+Verified for real with a genuinely nested source project
+(`parentgroup/childgroup/nestedtest-01`, three real API-created levels) -
+both group levels were created in the correct order with the correct
+`parent_id`, the project imported with real repository content, and its
+`path_with_namespace` on the restore instance was independently confirmed
+via the API to be `parentgroup/childgroup/nestedtest-01`, not flattened
+under `root`.
+
 **`mc cp --recursive` needs a trailing slash on the source, not just the
 destination**: uploading `gitlab_backup_run_dir` (no trailing slash)
 landed every file one directory level too deep -

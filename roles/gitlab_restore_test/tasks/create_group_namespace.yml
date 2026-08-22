@@ -1,0 +1,16 @@
+---
+# Included once per unique namespace.full_path (loop_var: gitlab_ns), e.g.
+# "a/b/c". Walks every path segment from the top down (depth 1: "a", depth
+# 2: "a/b", depth 3: "a/b/c"), creating each one that doesn't already exist
+# yet, chained to its own parent via parent_id. gitlab_created_groups
+# (path -> id) persists across every iteration of every namespace via
+# set_fact, so a shared parent (e.g. "a" used by both "a/b" and "a/c")
+# only ever gets looked up/created once.
+- name: "Ensure every path segment exists for {{ gitlab_ns }}"
+  vars:
+    gitlab_ns_segments: "{{ gitlab_ns.split('/') }}"
+  include_tasks: ensure_group_segment.yml
+  loop: "{{ range(1, gitlab_ns_segments | length + 1) | list }}"
+  loop_control:
+    loop_var: gitlab_ns_depth
+    label: "{{ gitlab_ns_segments[:gitlab_ns_depth] | join('/') }}"
