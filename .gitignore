@@ -1,3 +1,4 @@
 backups/*/
 .ansible-retry/
 *.retry
+.env

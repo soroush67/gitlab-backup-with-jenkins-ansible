@@ -1,0 +1,20 @@
+---
+# The MinIO instance backups get uploaded to. Defaults point at this
+# project's own docker-compose.minio.yml (dev/testing) - point at a real
+# object storage endpoint for production use via -e or a Jenkins
+# credential binding.
+minio_endpoint: "http://localhost:9010"
+minio_access_key: ""
+minio_secret_key: ""
+minio_bucket: "gitlab-backups"
+
+# Adjustable 10-30 days per requirement. Anything already in the bucket
+# older than this gets pruned on every run - not just what this run
+# uploaded. The same window also prunes local backups/<timestamp>/ run
+# directories (object storage is the durable copy; local is just staging).
+gitlab_backup_retention_days: 30
+
+# Matches roles/gitlab_backup/defaults/main.yml's gitlab_backup_dir -
+# duplicated (not relied on via cross-role variable bleed) so this role
+# stays correct even if run order or role composition ever changes.
+gitlab_backup_dir: "{{ playbook_dir }}/../backups"

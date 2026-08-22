@@ -194,6 +194,36 @@
         success_msg: "RESTORE VERIFICATION PASSED - all {{ gitlab_verify_summary | length }} project(s) restored correctly."
 
   always:
+    # In always:, not after the verification asserts above - a look-at-it-
+    # yourself need doesn't stop mattering just because verification
+    # happened to pass, and (more importantly) an assert failure above
+    # would otherwise skip straight past this without ever printing
+    # connection info, which is exactly the case someone most wants to
+    # inspect manually.
+    - name: Set a random root password for browser login (kept-running instance only)
+      command: >-
+        docker exec {{ gitlab_restore_container }} gitlab-rails runner
+        "u = User.find_by_username('root'); pw = SecureRandom.alphanumeric(20); u.password = pw; u.password_confirmation = pw; u.save!(validate: false); puts 'RESTORE_WEB_PASSWORD=' + pw"
+      register: gitlab_restore_web_password_result
+      when: not (gitlab_restore_teardown | bool)
+      changed_when: false
+      failed_when: false
+
+    - name: Determine a reachable address for the connection-info message
+      set_fact:
+        gitlab_restore_public_host: "{{ ansible_facts['default_ipv4']['address'] | default(ansible_facts['hostname']) }}"
+      when: not (gitlab_restore_teardown | bool)
+
+    - name: Print restore instance connection info for manual inspection
+      debug:
+        msg:
+          - "Restore instance kept running for manual inspection (gitlab_restore_teardown=false / KEEP_RESTORE_FOR_INSPECTION)."
+          - "URL: http://{{ gitlab_restore_public_host }}:{{ gitlab_restore_public_port }}"
+          - "Username: root"
+          - "Password: {{ (gitlab_restore_web_password_result.stdout | default('')) | regex_search('RESTORE_WEB_PASSWORD=(.*)', '\\1') | first | default('FAILED TO SET - check the previous task output') }}"
+          - "Remember to tear it down manually when done: docker-compose -f {{ gitlab_restore_compose_file }} down -v"
+      when: not (gitlab_restore_teardown | bool)
+
     - name: Tear down the disposable restore GitLab container
       command: "docker-compose -f {{ gitlab_restore_compose_file }} down -v"
       args:

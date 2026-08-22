@@ -5,10 +5,15 @@ Ansible automation, scheduled by Jenkins, that:
 1. Backs up every project on a GitLab instance via GitLab's own
    [Project Export API](https://docs.gitlab.com/ee/api/project_import_export.html)
    (repo + issues + MRs + wiki + CI config + settings, not just git data).
-2. Proves each backup is actually restorable by importing it into a
+2. Uploads the backup to object storage (MinIO/S3-compatible), with a
+   retention window (10-30 days, adjustable per run) that prunes anything
+   older on every run.
+3. Proves each backup is actually restorable by importing it into a
    **disposable** throwaway GitLab CE container (`docker-compose`) and
    checking the restored project really has its repository content - not
-   just that the archive file exists.
+   just that the archive file exists. Optionally left running afterward
+   (`KEEP_RESTORE_FOR_INSPECTION`) so you can browse the result yourself
+   instead of only trusting the automated pass/fail.
 
 ## Layout
 
@@ -16,28 +21,38 @@ Ansible automation, scheduled by Jenkins, that:
 docker-compose.gitlab-source.yml   - throwaway source GitLab (dev/testing only -
                                       point gitlab_url at a real instance for real use)
 docker-compose.gitlab-restore.yml  - disposable per-run restore-verification target,
-                                      spun up and torn down by the gitlab_restore_test role
+                                      spun up by gitlab_restore_test, torn down unless
+                                      KEEP_RESTORE_FOR_INSPECTION is set
+docker-compose.minio.yml           - throwaway object storage (dev/testing only -
+                                      point minio_endpoint at a real one for real use)
+.env.example                       - template for docker-compose.minio.yml's bootstrap
+                                      credentials (copy to .env, gitignored)
 roles/gitlab_backup/                - lists projects, exports, downloads, writes manifest.json
+roles/gitlab_backup_upload/         - uploads the run's backup to object storage, prunes old ones
 roles/gitlab_restore_test/          - imports the manifest's backups into a throwaway
-                                       GitLab, verifies, tears down
-playbooks/backup.yml               - backup only
-playbooks/backup_and_verify.yml    - backup + restore-verify (what Jenkins runs)
+                                       GitLab, verifies, tears down (or not)
+playbooks/backup.yml               - backup + upload, no restore-verify
+playbooks/backup_and_verify.yml    - backup + upload + restore-verify (what Jenkins runs)
 infra-GitlabBackup.groovy          - Jenkins pipeline (scheduled, "Pipeline script from SCM")
 backups/<timestamp>/               - one directory per run: *.tar.gz exports + manifest.json
+                                      (local staging before upload - object storage is the
+                                      durable copy; local run directories older than the
+                                      same retention window get pruned too, so disk usage
+                                      stays bounded the same way the bucket does)
 ```
 
 ## Requirements
 
 - `docker` + `docker-compose` (standalone binary) on whatever host runs
-  this - only needed for `gitlab_restore_test`'s disposable container, not
-  for `backup.yml` alone. **The OS user running the playbook must be in
-  the `docker` group** (`sudo usermod -aG docker <user>`, then restart
-  whatever process runs the playbook - for a Jenkins agent, that means
-  restarting the agent itself, since group membership only applies to new
-  sessions). Hit for real on a Jenkins agent whose user wasn't in that
-  group - `roles/gitlab_restore_test` now checks `docker info` up front
-  and fails with this exact fix instead of a raw "permission denied"
-  buried in a docker-compose command's stderr.
+  this. **The OS user running the playbook must be in the `docker`
+  group** (`sudo usermod -aG docker <user>`, then restart whatever process
+  runs the playbook - for a Jenkins agent, that means restarting the agent
+  itself, since group membership only applies to new sessions). Hit for
+  real on a Jenkins agent whose user wasn't in that group -
+  `roles/gitlab_restore_test` and `roles/gitlab_backup_upload` both check
+  `docker info` up front and fail with this exact fix instead of a raw
+  "permission denied" buried in a docker-compose/docker-run command's
+  stderr.
 - `curl` on the Ansible controller (used directly for the restore
   import - see "Design notes").
 - **An admin Personal Access Token (`api` scope) for the source GitLab
@@ -49,25 +64,67 @@ backups/<timestamp>/               - one directory per run: *.tar.gz exports + m
   against a genuine multi-project instance) with no error unless you
   check the count. The role checks the token's admin status up front and
   fails with a clear message if it isn't one.
+- **An access key/secret key for a MinIO/S3-compatible object storage
+  endpoint** (`minio_access_key`/`minio_secret_key`, or the Jenkins
+  `minio-credentials` credential) - required even for `backup.yml` alone,
+  since upload is on by default (`gitlab_backup_upload_enabled: true`; set
+  to `false` to skip it for a quick local-only test with no MinIO
+  running).
 
 ## Usage
 
 ```bash
-# backup only
+# backup + upload to object storage, no restore-verify
 ansible-playbook playbooks/backup.yml \
   -e gitlab_url=http://your-gitlab:port \
-  -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx
+  -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx \
+  -e minio_endpoint=http://your-minio:port \
+  -e minio_access_key=... -e minio_secret_key=... \
+  -e gitlab_backup_retention_days=30
 
-# backup + prove it's restorable (spins up + tears down a disposable GitLab CE)
+# backup + upload + prove it's restorable (spins up + tears down a disposable GitLab CE)
 ansible-playbook playbooks/backup_and_verify.yml \
   -e gitlab_url=http://your-gitlab:port \
-  -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx
+  -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx \
+  -e minio_endpoint=http://your-minio:port \
+  -e minio_access_key=... -e minio_secret_key=... \
+  -e gitlab_backup_retention_days=30
+
+# same, but leave the restore instance running afterward for manual inspection
+# (prints URL/username/password at the end - see "Manual inspection" below)
+ansible-playbook playbooks/backup_and_verify.yml \
+  -e gitlab_url=http://your-gitlab:port -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx \
+  -e minio_access_key=... -e minio_secret_key=... \
+  -e gitlab_restore_teardown=false
 ```
 
-`gitlab_token` can also come from the `GITLAB_TOKEN` env var (see
-`inventory/group_vars/all.yml`) - what the Jenkins pipeline uses via a
-`withCredentials` binding, so the token never appears in a build parameter
-or shell history.
+`gitlab_token`/`minio_access_key`/`minio_secret_key` can also come from env
+vars (see `inventory/group_vars/all.yml`) - what the Jenkins pipeline uses
+via `withCredentials` bindings, so nothing sensitive appears in a build
+parameter or shell history. In Jenkins, `KEEP_RESTORE_FOR_INSPECTION` and
+`BACKUP_RETENTION_DAYS` (choice, 10-30) are build parameters - no need to
+edit `-e` flags by hand.
+
+## Manual inspection after a run
+
+`gitlab_restore_teardown: false` (Jenkins: check `KEEP_RESTORE_FOR_INSPECTION`)
+leaves the disposable restore GitLab container running instead of tearing
+it down - useful when the automated pass/fail isn't enough and you want to
+actually browse the restored projects yourself. A random root password is
+generated and printed at the end of the run (console log in Jenkins):
+
+```
+Restore instance kept running for manual inspection (gitlab_restore_teardown=false / KEEP_RESTORE_FOR_INSPECTION).
+URL: http://<host>:8930
+Username: root
+Password: <random, printed here only - not stored anywhere>
+Remember to tear it down manually when done: docker-compose -f docker-compose.gitlab-restore.yml down -v
+```
+
+This prints regardless of whether verification passed or failed (it's in
+an `always:` block) - a failed run is exactly when you're most likely to
+want to look at it yourself. Remember to actually tear it down when done
+(the command is printed above) - it doesn't clean itself up.
 
 ## Development/testing source instance
 
@@ -93,22 +150,90 @@ to test end-to-end without risk to a real GitLab. Swap in the real
 self-hosted GitLab's URL + a real token for production use - nothing else
 in this project assumes the throwaway instance.
 
+## Development/testing object storage
+
+This repo also ships its own throwaway MinIO (`docker-compose.minio.yml`)
+for developing/testing the upload/retention step without a real object
+storage endpoint:
+
+```bash
+cp .env.example .env   # then edit MINIO_ROOT_PASSWORD to a real secret
+docker-compose -f docker-compose.minio.yml up -d
+```
+
+Data lives in a named volume (`gitlab-backup-minio-data`) the same way
+`gitlab-source`'s does - stop/restart keeps it. Point
+`minio_endpoint`/`minio_access_key`/`minio_secret_key` at this instance
+(`http://localhost:9010`, credentials from `.env`) to test end-to-end.
+Swap in a real MinIO/S3-compatible endpoint for production use.
+
 ## Verification status
 
 `playbooks/backup_and_verify.yml` run for real end-to-end against the
-throwaway source instance (10 test projects, each with a real commit):
-backup exported and downloaded all 10, the restore role imported all 10
-into a genuinely fresh disposable GitLab CE, and verification confirmed
-real repository content (an actual branch + commit, not just
+throwaway source instance (10 test projects, each with a real commit),
+with object storage upload and manual-inspection both enabled: backup
+exported/downloaded/uploaded all 10 to MinIO, the restore role imported
+all 10 into a genuinely fresh disposable GitLab CE, and verification
+confirmed real repository content (an actual branch + commit, not just
 `import_status: finished`) for all 10 -
 `RESTORE VERIFICATION PASSED - all 10 project(s) restored correctly.`,
-`failed=0` in the play recap, disposable container torn down cleanly
-afterward. Six real bugs were found and fixed getting there (five during
-initial development, one more - the `membership=true` project-listing bug
-below - when the pipeline first ran against a real multi-project instance)
-- see "Design notes" below for what they were and why each fix works.
+`failed=0` in the play recap. Also confirmed for real: the uploaded
+objects actually exist in the MinIO bucket; the generated root password
+is genuinely valid (`User#valid_password?` checked directly, not just
+"the task didn't error"); retention pruning both removes objects/local
+directories older than the window and leaves recent ones untouched
+(tested both directions, not just the delete path); and with
+`gitlab_restore_teardown: false` the restore instance is correctly left
+running with connection info printed instead of torn down. Eight real
+bugs were found and fixed getting the whole pipeline working (six before
+this feature set - see below - plus two more building object storage
+upload: `mc cp --recursive`'s trailing-slash nesting quirk, and the
+`docker info` access check needing to cover this role too, not just
+restore-verify).
 
 ## Design notes
+
+**`mc cp --recursive` needs a trailing slash on the source, not just the
+destination**: uploading `gitlab_backup_run_dir` (no trailing slash)
+landed every file one directory level too deep -
+`gitlab-backups/<run>/upload/1__demo-project-01.tar.gz` instead of
+`gitlab-backups/<run>/1__demo-project-01.tar.gz` - because `mc cp -r SRC
+DST` treats a source directory like `cp -r dir dest/` (copies the
+directory itself, named after its own mount point) unless SRC also ends
+in `/`, which instead copies its *contents* directly into DST (like `cp
+-r dir/. dest/`). Confirmed directly by uploading the same real backup run
+both ways and listing the resulting bucket structure with `mc ls`.
+
+**Upload happens before restore-verification, not after**: a transient
+disposable-restore-container hiccup should never risk a legitimate backup
+existing only on local disk. Verification is a quality signal layered on
+top of an already-safely-offsite backup, not a gate for whether to keep
+it - so `playbooks/backup_and_verify.yml` runs `gitlab_backup_upload`
+right after `gitlab_backup`, before `gitlab_restore_test`.
+
+**Retention prunes local `backups/` the same way it prunes the bucket**:
+object storage is the durable copy, but without also pruning
+`backups/<timestamp>/` locally, disk usage on whatever host runs this
+would grow unbounded across scheduled runs even though the bucket stays
+bounded. Uses `ansible.builtin.find`'s `age` filter (`recurse: false`, so
+it only considers the immediate `backups/<timestamp>/` directories, never
+descends into what's inside them) with the same
+`gitlab_backup_retention_days` window MinIO's own `mc rm --older-than`
+uses - tested both directions directly (a deliberately-backdated fake old
+run directory got removed; a recent one and the current run's own
+directory did not).
+
+**Manual-inspection connection info lives in the `always:` block, after
+teardown became conditional**: printing it *after* the final
+pass/fail assert would mean an assert failure (exactly when someone is
+most likely to want to look at the instance themselves) skips straight
+past it and never prints anything. Moved into `always:`, ahead of the now-
+conditional teardown task, so it prints regardless of whether verification
+passed or failed. The random root password
+(`User#password =`/`save!(validate: false)`) is generated fresh per run
+and only ever appears in that run's console output - confirmed genuinely
+valid directly via `User#valid_password?`, not just "the task didn't
+error."
 
 **Project listing requires an admin token - `membership=true` silently
 under-lists**: the first real production run (against a genuine

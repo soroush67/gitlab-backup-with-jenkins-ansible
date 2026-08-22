@@ -1,11 +1,20 @@
 ---
-# Backup every project, then prove each backup is actually restorable by
-# importing it into a disposable throwaway GitLab CE container
-# (docker-compose.gitlab-restore.yml) and checking the restored project
-# really has its repository content - not just that the archive file
-# exists. This is what Jenkins should run on a schedule.
+# Backup every project, upload the backup to object storage, then prove
+# it's actually restorable by importing it into a disposable throwaway
+# GitLab CE container (docker-compose.gitlab-restore.yml) and checking the
+# restored project really has its repository content - not just that the
+# archive file exists. This is what Jenkins should run on a schedule.
+#
+# Upload happens before restore-verification, not after: a transient
+# restore-container hiccup should never risk leaving a legitimate backup
+# only on local disk - verification is a quality signal on top of an
+# already-safely-offsite backup, not a gate for keeping it.
 - hosts: local
   gather_facts: true
+  vars:
+    gitlab_backup_upload_enabled: true
   roles:
     - gitlab_backup
+    - role: gitlab_backup_upload
+      when: gitlab_backup_upload_enabled | bool
     - gitlab_restore_test

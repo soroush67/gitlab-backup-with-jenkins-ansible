@@ -1,9 +1,15 @@
 ---
 # Backup only - exports every project this token can see from gitlab_url
-# and downloads the archives + a manifest.json into backups/<timestamp>/.
+# and downloads the archives + a manifest.json into backups/<timestamp>/,
+# then uploads that to object storage (set gitlab_backup_upload_enabled:
+# false to skip - e.g. for a quick local-only test with no MinIO running).
 # Does NOT verify the backups are actually restorable - see
 # backup_and_verify.yml for that.
 - hosts: local
   gather_facts: true
+  vars:
+    gitlab_backup_upload_enabled: true
   roles:
     - gitlab_backup
+    - role: gitlab_backup_upload
+      when: gitlab_backup_upload_enabled | bool

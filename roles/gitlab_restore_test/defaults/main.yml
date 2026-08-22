@@ -25,6 +25,13 @@ gitlab_import_start_retries: 12
 gitlab_import_start_delay: 8
 
 # Tear the disposable restore container down (docker-compose down -v) once
-# verification finishes. Set false to leave it up for manual inspection
-# after a failed run.
+# verification finishes. Set false (Jenkins: the KEEP_RESTORE_FOR_INSPECTION
+# parameter) to leave it up for manual inspection - regardless of whether
+# verification passed or failed, since a look-at-it-yourself need doesn't
+# stop mattering just because the automated check happened to pass.
 gitlab_restore_teardown: true
+
+# Published host port for the restore instance (must match the actual
+# `ports:` mapping in docker-compose.gitlab-restore.yml) - used to build
+# the browser URL printed when gitlab_restore_teardown is false.
+gitlab_restore_public_port: 8930
