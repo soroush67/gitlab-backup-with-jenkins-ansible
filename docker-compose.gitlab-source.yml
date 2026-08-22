@@ -18,12 +18,33 @@ services:
       - "8929:8929"
       - "2224:22"
     volumes:
-      - ./gitlab-source-config:/etc/gitlab
-      - ./gitlab-source-logs:/var/log/gitlab
-      - ./gitlab-source-data:/var/opt/gitlab
+      - gitlab-source-config:/etc/gitlab
+      - gitlab-source-logs:/var/log/gitlab
+      - gitlab-source-data:/var/opt/gitlab
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8929/-/readiness"]
       interval: 30s
       timeout: 10s
       retries: 10
       start_period: 5m
+
+volumes:
+  # Named volumes, not host bind-mounts: GitLab's own container writes as
+  # internal uids that don't map cleanly to a host user (hit real
+  # "Permission denied" browsing these directories directly earlier), and
+  # named volumes persist across container recreates/restarts the same way
+  # without that friction - `docker-compose down` (no -v)/`stop`+`up` keep
+  # this data; only `down -v` or `docker volume rm` wipes it.
+  #
+  # `name:` pins the exact volume name so it doesn't get silently prefixed
+  # with the compose project name - without it, `docker-compose up` creates
+  # a *different*, empty, project-prefixed volume instead of reusing one
+  # that already exists under the plain name (hit this directly while
+  # migrating off bind-mounts: the container came back up genuinely empty
+  # until this was added).
+  gitlab-source-config:
+    name: gitlab-source-config
+  gitlab-source-logs:
+    name: gitlab-source-logs
+  gitlab-source-data:
+    name: gitlab-source-data

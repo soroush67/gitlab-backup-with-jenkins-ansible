@@ -1,6 +1,3 @@
 backups/*/
-gitlab-source-config/
-gitlab-source-logs/
-gitlab-source-data/
 .ansible-retry/
 *.retry

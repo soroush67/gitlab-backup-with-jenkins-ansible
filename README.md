@@ -63,8 +63,15 @@ developing/testing this automation without touching a real GitLab:
 ```bash
 docker-compose -f docker-compose.gitlab-source.yml up -d
 # wait ~5-8 min for first boot, then:
-sudo cat gitlab-source-config/initial_root_password   # root's auto-generated password
+docker exec gitlab-source cat /etc/gitlab/initial_root_password   # root's auto-generated password
 ```
+
+Data lives in named Docker volumes (`gitlab-source-config`/`-logs`/`-data`,
+pinned via `name:` in the compose file), not host bind-mounts - stopping
+and restarting the container (`docker-compose stop`/`up -d`, or a full
+`docker-compose down` without `-v`) comes back up in seconds with
+everything intact instead of re-running first-boot setup. Only `down -v`
+or an explicit `docker volume rm` wipes it.
 
 Point `gitlab_url`/`gitlab_token` at this instance (`http://localhost:8929`)
 to test end-to-end without risk to a real GitLab. Swap in the real
