@@ -202,6 +202,24 @@ RustFS.
 
 ## Design notes
 
+**Projects are exported and downloaded one at a time, not all started up
+front**: reported directly, at real scale (100+ projects across several
+namespaces) - starting every project's export first and only polling for
+completion afterward (the original design: three separate loops -
+start-all, then wait-all, then download-all) requests every export up
+front, so GitLab ends up running every one of those jobs concurrently on
+its own side even though the *requesting* loop is sequential - enough
+concurrent export jobs made GitLab itself become unreachable at that
+scale. `roles/gitlab_backup/tasks/backup_one_project.yml`, included once
+per project from `main.yml`, does start → wait → download fully for one
+project before the loop moves on to the next - confirmed directly (task
+log ordering) that GitLab only ever has a single export job from this
+tool in flight at any moment, across 12 real projects spanning three
+different namespaces (`root`, `testgroup`, `parentgroup/childgroup`). The
+tradeoff is a longer total wall-clock time for very large instances,
+which is the intended one - reliability over speed for something meant to
+run unattended on a schedule.
+
 **Why RustFS instead of MinIO for the throwaway dev/test object storage**:
 switched on request - RustFS is already relied on elsewhere in this same
 environment (the kubespray-webui project's etcd-backup service), so

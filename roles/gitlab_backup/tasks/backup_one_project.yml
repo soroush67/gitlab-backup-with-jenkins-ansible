@@ -1,0 +1,46 @@
+---
+# Included once per project (loop_var: item, from main.yml), doing
+# start -> wait -> download fully for ONE project before the loop moves
+# on to the next. This is deliberately NOT three separate loops
+# (start-all, then wait-all, then download-all) - that pattern requests
+# every project's export up front, so GitLab ends up running every export
+# job concurrently on its own side even though the requesting loop itself
+# is sequential. One project fully finishing (including its download)
+# before the next one's export is even requested keeps GitLab down to a
+# single export job from this tool at any moment - requested directly
+# ("داره روی gitlab فشار میاره" - it's putting pressure on GitLab).
+
+- name: "Start export for {{ item.path_with_namespace }}"
+  # GitLab throttles the project-export endpoint fairly aggressively (hit
+  # a real 429 "requested too many times" after ~6 rapid calls in
+  # testing) - retry on 429 with backoff instead of treating it as a hard
+  # failure.
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export"
+    method: POST
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    status_code: [202, 429]
+  register: gitlab_export_start
+  until: gitlab_export_start.status == 202
+  retries: "{{ gitlab_export_start_retries }}"
+  delay: "{{ gitlab_export_start_delay }}"
+
+- name: "Wait for export to finish for {{ item.path_with_namespace }}"
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    return_content: true
+  register: gitlab_export_status
+  until: gitlab_export_status.json.export_status == 'finished'
+  retries: "{{ gitlab_export_poll_retries }}"
+  delay: "{{ gitlab_export_poll_delay }}"
+
+- name: "Download export archive for {{ item.path_with_namespace }}"
+  get_url:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export/download"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    dest: "{{ gitlab_backup_run_dir }}/{{ item.id }}__{{ item.path | regex_replace('[^A-Za-z0-9_.-]', '_') }}.tar.gz"
+    mode: "0640"

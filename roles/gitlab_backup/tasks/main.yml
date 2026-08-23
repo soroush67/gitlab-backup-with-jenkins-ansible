@@ -96,45 +96,16 @@
     state: directory
     mode: "0750"
 
-- name: Start an export for every project
-  # GitLab throttles the project-export endpoint fairly aggressively (hit a
-  # real 429 "requested too many times" after ~6 rapid calls in testing) -
-  # retry on 429 with backoff instead of treating it as a hard failure.
-  uri:
-    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export"
-    method: POST
-    headers:
-      PRIVATE-TOKEN: "{{ gitlab_token }}"
-    status_code: [202, 429]
-  register: gitlab_export_start
-  until: gitlab_export_start.status == 202
-  retries: "{{ gitlab_export_start_retries }}"
-  delay: "{{ gitlab_export_start_delay }}"
-  loop: "{{ gitlab_all_projects }}"
-  loop_control:
-    label: "{{ item.path_with_namespace }}"
-
-- name: Wait for every export to finish
-  uri:
-    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export"
-    headers:
-      PRIVATE-TOKEN: "{{ gitlab_token }}"
-    return_content: true
-  register: gitlab_export_status
-  until: gitlab_export_status.json.export_status == 'finished'
-  retries: "{{ gitlab_export_poll_retries }}"
-  delay: "{{ gitlab_export_poll_delay }}"
-  loop: "{{ gitlab_all_projects }}"
-  loop_control:
-    label: "{{ item.path_with_namespace }}"
-
-- name: Download every finished export archive
-  get_url:
-    url: "{{ gitlab_url }}/api/v4/projects/{{ item.id }}/export/download"
-    headers:
-      PRIVATE-TOKEN: "{{ gitlab_token }}"
-    dest: "{{ gitlab_backup_run_dir }}/{{ item.id }}__{{ item.path | regex_replace('[^A-Za-z0-9_.-]', '_') }}.tar.gz"
-    mode: "0640"
+- name: Export and download each project one at a time
+  # NOT three separate loops (start-all, wait-all, download-all) - that
+  # earlier design requested every project's export up front, so GitLab
+  # ended up running every export job concurrently on its own side even
+  # though the requesting loop itself was sequential ("داره روی gitlab
+  # فشار میاره" - real load reported directly). include_tasks per project
+  # means start -> wait -> download fully completes for one project
+  # before the next project's export is even requested - GitLab only ever
+  # has one export job from this tool in flight at a time.
+  include_tasks: backup_one_project.yml
   loop: "{{ gitlab_all_projects }}"
   loop_control:
     label: "{{ item.path_with_namespace }}"
