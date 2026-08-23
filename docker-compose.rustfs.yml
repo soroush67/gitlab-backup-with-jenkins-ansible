@@ -6,7 +6,7 @@ services:
     # write to (hit for real: "[FATAL] ... Io error: Permission denied
     # (os error 13)", crash-looping on every start). This one-shot init
     # container chowns them before rustfs itself ever starts.
-    image: busybox:latest
+    image: "${DOCKER_REGISTRY-docker-hosted.hamainsurance.net/}busybox:latest"
     command: chown -R 10001:10001 /data/rustfs0 /data/rustfs1 /data/rustfs2 /data/rustfs3 /app/logs
     volumes:
       - rustfs-data-0:/data/rustfs0
@@ -16,7 +16,7 @@ services:
       - rustfs-logs:/app/logs
 
   rustfs:
-    image: rustfs/rustfs:latest
+    image: "${DOCKER_REGISTRY-docker-hosted.hamainsurance.net/}rustfs/rustfs:latest"
     container_name: gitlab-backup-rustfs
     security_opt:
       - "no-new-privileges:true"
