@@ -1,6 +1,6 @@
 services:
   gitlab-source:
-    image: "${DOCKER_REGISTRY-docker-hosted.hamainsurance.net/}gitlab/gitlab-ce:17.10.5-ce.0"
+    image: docker-hosted.hamainsurance.net/gitlab/gitlab-ce:17.10.5-ce.0
     container_name: gitlab-source
     hostname: gitlab-source.local
     restart: unless-stopped

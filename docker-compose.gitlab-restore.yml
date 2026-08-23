@@ -1,6 +1,6 @@
 services:
   gitlab-restore:
-    image: "${DOCKER_REGISTRY-docker-hosted.hamainsurance.net/}gitlab/gitlab-ce:17.10.5-ce.0"
+    image: docker-hosted.hamainsurance.net/gitlab/gitlab-ce:17.10.5-ce.0
     container_name: gitlab-restore
     hostname: gitlab-restore.local
     restart: "no"
