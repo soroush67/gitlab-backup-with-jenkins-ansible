@@ -1,0 +1,45 @@
+---
+# Included recursively (starting from main.yml with gitlab_projects_page:
+# 1), fetching one page and accumulating it into gitlab_all_projects,
+# then recursing for the next page ONLY if this page came back completely
+# full (== gitlab_projects_per_page items) - a short (or empty) page is
+# the reliable, always-correct signal that it was the last one.
+#
+# NOT relying on the X-Total-Pages response header (the previous design):
+# confirmed for real against a genuine large self-hosted instance (100+
+# projects) that GitLab doesn't always return that header - the report
+# came back "Found 100 project(s)" (exactly one page's worth, silently
+# stopping there) even though the real instance had well over 100. This
+# page-by-page walk works regardless of whether GitLab computes/returns a
+# total count at all.
+
+- name: "List projects - page {{ gitlab_projects_page }}"
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects?simple=true&per_page={{ gitlab_projects_per_page }}&page={{ gitlab_projects_page }}&order_by=id&sort=asc"
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token }}"
+    return_content: true
+  register: gitlab_projects_page_result
+
+- name: "Accumulate page {{ gitlab_projects_page }}'s results"
+  set_fact:
+    gitlab_all_projects: "{{ gitlab_all_projects + gitlab_projects_page_result.json }}"
+
+- name: "Compute the next page number"
+  # A DIFFERENT variable name than the one being incremented
+  # (gitlab_projects_next_page, not gitlab_projects_page) - confirmed
+  # directly that passing "gitlab_projects_page: {{ gitlab_projects_page |
+  # int + 1 }}" straight into the recursive include_tasks' vars: creates a
+  # genuinely self-referential Jinja2 template (the same name defined in
+  # terms of itself) instead of using the enclosing scope's existing
+  # value - Ansible reported it plainly: "Recursive loop detected in
+  # template: maximum recursion depth exceeded", on page 1, before any
+  # task-level logic even ran.
+  set_fact:
+    gitlab_projects_next_page: "{{ gitlab_projects_page | int + 1 }}"
+
+- name: "Fetch the next page (page {{ gitlab_projects_page }} came back full)"
+  include_tasks: list_projects_page.yml
+  vars:
+    gitlab_projects_page: "{{ gitlab_projects_next_page }}"
+  when: (gitlab_projects_page_result.json | length) == (gitlab_projects_per_page | int)

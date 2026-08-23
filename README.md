@@ -202,6 +202,35 @@ RustFS.
 
 ## Design notes
 
+**Project listing silently stopped after one page on a real large
+instance - `X-Total-Pages` isn't always returned**: reported directly -
+a real self-hosted instance with 100+ projects reported "Found 100
+project(s)" (exactly one page's worth at the default `per_page=100`) and
+silently backed up only those. The original pagination logic read the
+`X-Total-Pages` response header from page 1 and only fetched further
+pages `when: gitlab_total_pages > 1`, defaulting to `1` if that header
+was missing - which it was, on this real instance (GitLab doesn't always
+compute/return total counts, especially on larger instances where the
+count itself is expensive). Fixed by not depending on that header at all:
+`roles/gitlab_backup/tasks/list_projects_page.yml` fetches pages
+recursively, stopping only once a page comes back with fewer than
+`gitlab_projects_per_page` items - a reliable signal regardless of
+whether GitLab computes a total. Found a second real bug fixing the
+first: passing the incremented page number straight into the recursive
+`include_tasks`'s `vars:` under the *same* name being incremented
+(`gitlab_projects_page: "{{ gitlab_projects_page | int + 1 }}"`) creates
+a genuinely self-referential Jinja2 template - confirmed directly,
+Ansible reported it plainly ("Recursive loop detected in template:
+maximum recursion depth exceeded") before any task logic even ran, and a
+first attempt at the page-walking fix alone actually made things *worse*
+(walked all the way to page 96 against real data that only has 3 pages,
+before erroring out) until this was caught too. Fixed with a distinctly-
+named intermediate variable (`gitlab_projects_next_page`). Verified for
+real, both bugs together: forced pagination against real data (12 real
+projects, `per_page=5`) correctly walked exactly 3 pages and found all 12;
+the default `per_page=100` single-page case (this project's own 12-project
+dev instance) still works unchanged.
+
 **Projects are exported and downloaded one at a time, not all started up
 front**: reported directly, at real scale (100+ projects across several
 namespaces) - starting every project's export first and only polling for

@@ -44,35 +44,14 @@
       guarantee every project gets backed up.
   when: not (gitlab_token_identity.json.is_admin | default(false))
 
-- name: List projects - page 1 (also tells us the total page count)
-  uri:
-    url: "{{ gitlab_url }}/api/v4/projects?simple=true&per_page=100&page=1&order_by=id&sort=asc"
-    headers:
-      PRIVATE-TOKEN: "{{ gitlab_token }}"
-    return_content: true
-  register: gitlab_projects_page1
-
-- name: Set fact - total pages and accumulated project list
+- name: Start with an empty project list
   set_fact:
-    gitlab_total_pages: "{{ gitlab_projects_page1.headers['x-total-pages'] | default('1') | int }}"
-    gitlab_all_projects: "{{ gitlab_projects_page1.json }}"
+    gitlab_all_projects: []
 
-- name: List projects - remaining pages
-  uri:
-    url: "{{ gitlab_url }}/api/v4/projects?simple=true&per_page=100&page={{ item }}&order_by=id&sort=asc"
-    headers:
-      PRIVATE-TOKEN: "{{ gitlab_token }}"
-    return_content: true
-  register: gitlab_projects_rest
-  loop: "{{ range(2, gitlab_total_pages + 1) | list }}"
-  loop_control:
-    label: "page {{ item }}"
-  when: gitlab_total_pages > 1
-
-- name: Append remaining pages to the project list
-  set_fact:
-    gitlab_all_projects: "{{ gitlab_all_projects + (gitlab_projects_rest.results | map(attribute='json') | list | flatten(1)) }}"
-  when: gitlab_total_pages > 1
+- name: List all projects, page by page, until a short page signals the end
+  include_tasks: list_projects_page.yml
+  vars:
+    gitlab_projects_page: 1
 
 - name: Report how many projects were found
   debug:

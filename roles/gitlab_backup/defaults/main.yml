@@ -5,6 +5,7 @@
 # docker-compose.gitlab-source.yml).
 gitlab_url: "http://localhost:8929"
 gitlab_token: ""
+gitlab_projects_per_page: 100
 
 gitlab_backup_dir: "{{ playbook_dir }}/../backups"
 # Set by the playbook per-run (timestamped subdirectory) - overridable so
