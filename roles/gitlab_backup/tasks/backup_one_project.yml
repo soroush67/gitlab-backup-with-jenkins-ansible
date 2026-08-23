@@ -44,3 +44,11 @@
       PRIVATE-TOKEN: "{{ gitlab_token }}"
     dest: "{{ gitlab_backup_run_dir }}/{{ item.id }}__{{ item.path | regex_replace('[^A-Za-z0-9_.-]', '_') }}.tar.gz"
     mode: "0640"
+
+- name: "Pause before the next project ({{ gitlab_backup_inter_project_delay_seconds }}s)"
+  # On top of exports already being fully sequential - an extra knob for
+  # when that alone still isn't gentle enough on GitLab at very large
+  # project counts. A no-op at the default of 0.
+  pause:
+    seconds: "{{ gitlab_backup_inter_project_delay_seconds }}"
+  when: gitlab_backup_inter_project_delay_seconds | int > 0

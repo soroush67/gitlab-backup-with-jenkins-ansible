@@ -19,3 +19,11 @@ gitlab_export_poll_delay: 10
 # settings for starting each export (separate from polling its completion).
 gitlab_export_start_retries: 12
 gitlab_export_start_delay: 8
+
+# Extra pause between finishing one project (export + download) and
+# starting the next one's export - on top of exports already being fully
+# sequential (see roles/gitlab_backup/tasks/backup_one_project.yml).
+# 0 by default (no extra pause). Raise this if GitLab is still under
+# heavy load with fully-sequential exports alone, e.g. at very large
+# project counts (100+) - Jenkins: INTER_PROJECT_DELAY_SECONDS.
+gitlab_backup_inter_project_delay_seconds: 0

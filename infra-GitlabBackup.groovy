@@ -57,6 +57,7 @@ pipeline {
         choice(name: 'BACKUP_RETENTION_DAYS', choices: ['30', '25', '20', '15', '10'], description: 'Delete backups already in object storage older than this many days, on every run')
         booleanParam(name: 'VERIFY_RESTORE', defaultValue: true, description: 'After backing up, prove each backup is restorable via a disposable GitLab CE container (slower - a few minutes per run for the throwaway instance to boot)')
         booleanParam(name: 'KEEP_RESTORE_FOR_INSPECTION', defaultValue: false, description: 'Leave the disposable restore GitLab container running after this pipeline finishes, instead of tearing it down, so you can browse it yourself and see the result - only applies when VERIFY_RESTORE is checked. A random root password is generated and printed in this console log. Remember to tear it down manually when done (see the printed instructions).')
+        string(name: 'INTER_PROJECT_DELAY_SECONDS', defaultValue: '0', description: 'Extra pause (seconds) after each project finishes before starting the next one\'s export - on top of exports already being fully sequential. Raise this if GitLab is still under heavy load at very large project counts (100+).')
     }
 
     stages {
@@ -72,6 +73,7 @@ pipeline {
                 GITLAB_URL = "${params.GITLAB_URL}"
                 OBJECT_STORAGE_ENDPOINT = "${params.OBJECT_STORAGE_ENDPOINT}"
                 BACKUP_RETENTION_DAYS = "${params.BACKUP_RETENTION_DAYS}"
+                INTER_PROJECT_DELAY_SECONDS = "${params.INTER_PROJECT_DELAY_SECONDS}"
             }
             steps {
                 withCredentials([
@@ -86,7 +88,8 @@ pipeline {
                           -e object_storage_endpoint="$OBJECT_STORAGE_ENDPOINT" \
                           -e object_storage_access_key="$OBJECT_STORAGE_ACCESS_KEY" \
                           -e object_storage_secret_key="$OBJECT_STORAGE_SECRET_KEY" \
-                          -e gitlab_backup_retention_days="$BACKUP_RETENTION_DAYS"
+                          -e gitlab_backup_retention_days="$BACKUP_RETENTION_DAYS" \
+                          -e gitlab_backup_inter_project_delay_seconds="$INTER_PROJECT_DELAY_SECONDS"
                     '''
                 }
             }
@@ -99,6 +102,7 @@ pipeline {
                 OBJECT_STORAGE_ENDPOINT = "${params.OBJECT_STORAGE_ENDPOINT}"
                 BACKUP_RETENTION_DAYS = "${params.BACKUP_RETENTION_DAYS}"
                 KEEP_RESTORE_FOR_INSPECTION = "${params.KEEP_RESTORE_FOR_INSPECTION}"
+                INTER_PROJECT_DELAY_SECONDS = "${params.INTER_PROJECT_DELAY_SECONDS}"
             }
             steps {
                 withCredentials([
@@ -114,6 +118,7 @@ pipeline {
                           -e object_storage_access_key="$OBJECT_STORAGE_ACCESS_KEY" \
                           -e object_storage_secret_key="$OBJECT_STORAGE_SECRET_KEY" \
                           -e gitlab_backup_retention_days="$BACKUP_RETENTION_DAYS" \
+                          -e gitlab_backup_inter_project_delay_seconds="$INTER_PROJECT_DELAY_SECONDS" \
                           -e gitlab_restore_teardown="$([ "$KEEP_RESTORE_FOR_INSPECTION" = "true" ] && echo false || echo true)"
                     '''
                 }

@@ -220,6 +220,16 @@ tradeoff is a longer total wall-clock time for very large instances,
 which is the intended one - reliability over speed for something meant to
 run unattended on a schedule.
 
+**`gitlab_backup_inter_project_delay_seconds`** (Jenkins:
+`INTER_PROJECT_DELAY_SECONDS`, default `0`) adds an extra pause after each
+project finishes (export + download) before the next one's export is even
+requested - on top of exports already being fully sequential above. Not
+needed for the 12-project throwaway dev instance (confirmed working with
+this at `0`, the default - a no-op `pause` task, skipped entirely rather
+than sleeping for zero seconds), but added for real deployments at much
+larger project counts (100+) where fully-sequential exports alone might
+still not be gentle enough on GitLab.
+
 **Why RustFS instead of MinIO for the throwaway dev/test object storage**:
 switched on request - RustFS is already relied on elsewhere in this same
 environment (the kubespray-webui project's etcd-backup service), so
