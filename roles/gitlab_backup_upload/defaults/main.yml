@@ -1,12 +1,14 @@
 ---
-# The MinIO instance backups get uploaded to. Defaults point at this
-# project's own docker-compose.minio.yml (dev/testing) - point at a real
-# object storage endpoint for production use via -e or a Jenkins
-# credential binding.
-minio_endpoint: "http://localhost:9010"
-minio_access_key: ""
-minio_secret_key: ""
-minio_bucket: "gitlab-backups"
+# The S3-compatible object storage backups get uploaded to via the
+# minio/mc CLI image (mc is a generic S3-compatible client - "MinIO
+# Client" is just its name, it works against any S3-compatible backend,
+# RustFS included). Defaults point at this project's own
+# docker-compose.rustfs.yml (dev/testing) - point at a real endpoint for
+# production use via -e or a Jenkins credential binding.
+object_storage_endpoint: "http://localhost:9010"
+object_storage_access_key: ""
+object_storage_secret_key: ""
+object_storage_bucket: "gitlab-backups"
 
 # Adjustable 10-30 days per requirement. Anything already in the bucket
 # older than this gets pruned on every run - not just what this run

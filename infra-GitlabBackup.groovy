@@ -3,11 +3,12 @@
 //
 // Runs ansible-playbook (playbooks/backup_and_verify.yml) on a schedule:
 // exports every project from the source GitLab instance, downloads the
-// archives, uploads them to object storage (MinIO/S3-compatible, with
-// adjustable retention), then proves each backup is actually restorable by
-// importing it into a disposable throwaway GitLab CE container
-// (docker-compose) and checking the restored project really has its
-// repository content. See README.md for the full design.
+// archives, uploads them to object storage (RustFS by default, or any
+// other S3-compatible endpoint, with adjustable retention), then proves
+// each backup is actually restorable by importing it into a disposable
+// throwaway GitLab CE container (docker-compose) and checking the
+// restored project really has its repository content. See README.md for
+// the full design.
 //
 // One-time Jenkins setup required before this works:
 //   1. Set AGENT_NODE_LABEL below to the real label of the agent node that
@@ -23,18 +24,18 @@
 //      backing up every project on the instance requires one (see README).
 //   3. Create a "Username with password" credential holding the object
 //      storage access key (as username) / secret key (as password), with
-//      ID MINIO_CREDENTIALS_ID below - must match whatever MinIO/S3
-//      endpoint MINIO_ENDPOINT points at.
-//   4. Adjust GITLAB_URL/MINIO_ENDPOINT below (or override via the job's
-//      own build parameters) if they aren't this repo's default throwaway
-//      containers on localhost.
+//      ID OBJECT_STORAGE_CREDENTIALS_ID below - must match whatever
+//      RustFS/S3-compatible endpoint OBJECT_STORAGE_ENDPOINT points at.
+//   4. Adjust GITLAB_URL/OBJECT_STORAGE_ENDPOINT below (or override via
+//      the job's own build parameters) if they aren't this repo's default
+//      throwaway containers on localhost.
 //   5. This job must not run concurrently with itself (disableConcurrentBuilds
 //      below) - the restore step uses a single fixed container
 //      name/port (gitlab-restore:8930), so two runs would collide.
 
 def AGENT_NODE_LABEL = 'CHANGE_ME_GITLAB_BACKUP_AGENT_LABEL'
 def GITLAB_TOKEN_CREDENTIALS_ID = 'gitlab-backup-token'
-def MINIO_CREDENTIALS_ID = 'minio-credentials'
+def OBJECT_STORAGE_CREDENTIALS_ID = 'object-storage-credentials'
 
 pipeline {
     agent { label AGENT_NODE_LABEL }
@@ -52,7 +53,7 @@ pipeline {
 
     parameters {
         string(name: 'GITLAB_URL', defaultValue: 'http://localhost:8929', description: 'Source GitLab instance to back up')
-        string(name: 'MINIO_ENDPOINT', defaultValue: 'http://localhost:9010', description: 'Object storage (MinIO/S3-compatible) endpoint backups are uploaded to')
+        string(name: 'OBJECT_STORAGE_ENDPOINT', defaultValue: 'http://localhost:9010', description: 'Object storage (RustFS/S3-compatible) endpoint backups are uploaded to')
         choice(name: 'BACKUP_RETENTION_DAYS', choices: ['30', '25', '20', '15', '10'], description: 'Delete backups already in object storage older than this many days, on every run')
         booleanParam(name: 'VERIFY_RESTORE', defaultValue: true, description: 'After backing up, prove each backup is restorable via a disposable GitLab CE container (slower - a few minutes per run for the throwaway instance to boot)')
         booleanParam(name: 'KEEP_RESTORE_FOR_INSPECTION', defaultValue: false, description: 'Leave the disposable restore GitLab container running after this pipeline finishes, instead of tearing it down, so you can browse it yourself and see the result - only applies when VERIFY_RESTORE is checked. A random root password is generated and printed in this console log. Remember to tear it down manually when done (see the printed instructions).')
@@ -69,22 +70,22 @@ pipeline {
             when { expression { !params.VERIFY_RESTORE } }
             environment {
                 GITLAB_URL = "${params.GITLAB_URL}"
-                MINIO_ENDPOINT = "${params.MINIO_ENDPOINT}"
+                OBJECT_STORAGE_ENDPOINT = "${params.OBJECT_STORAGE_ENDPOINT}"
                 BACKUP_RETENTION_DAYS = "${params.BACKUP_RETENTION_DAYS}"
             }
             steps {
                 withCredentials([
                     string(credentialsId: GITLAB_TOKEN_CREDENTIALS_ID, variable: 'GITLAB_TOKEN'),
-                    usernamePassword(credentialsId: MINIO_CREDENTIALS_ID, usernameVariable: 'MINIO_ACCESS_KEY', passwordVariable: 'MINIO_SECRET_KEY'),
+                    usernamePassword(credentialsId: OBJECT_STORAGE_CREDENTIALS_ID, usernameVariable: 'OBJECT_STORAGE_ACCESS_KEY', passwordVariable: 'OBJECT_STORAGE_SECRET_KEY'),
                 ]) {
                     sh '''
                         set -e
                         ansible-playbook playbooks/backup.yml \
                           -e gitlab_url="$GITLAB_URL" \
                           -e gitlab_token="$GITLAB_TOKEN" \
-                          -e minio_endpoint="$MINIO_ENDPOINT" \
-                          -e minio_access_key="$MINIO_ACCESS_KEY" \
-                          -e minio_secret_key="$MINIO_SECRET_KEY" \
+                          -e object_storage_endpoint="$OBJECT_STORAGE_ENDPOINT" \
+                          -e object_storage_access_key="$OBJECT_STORAGE_ACCESS_KEY" \
+                          -e object_storage_secret_key="$OBJECT_STORAGE_SECRET_KEY" \
                           -e gitlab_backup_retention_days="$BACKUP_RETENTION_DAYS"
                     '''
                 }
@@ -95,23 +96,23 @@ pipeline {
             when { expression { params.VERIFY_RESTORE } }
             environment {
                 GITLAB_URL = "${params.GITLAB_URL}"
-                MINIO_ENDPOINT = "${params.MINIO_ENDPOINT}"
+                OBJECT_STORAGE_ENDPOINT = "${params.OBJECT_STORAGE_ENDPOINT}"
                 BACKUP_RETENTION_DAYS = "${params.BACKUP_RETENTION_DAYS}"
                 KEEP_RESTORE_FOR_INSPECTION = "${params.KEEP_RESTORE_FOR_INSPECTION}"
             }
             steps {
                 withCredentials([
                     string(credentialsId: GITLAB_TOKEN_CREDENTIALS_ID, variable: 'GITLAB_TOKEN'),
-                    usernamePassword(credentialsId: MINIO_CREDENTIALS_ID, usernameVariable: 'MINIO_ACCESS_KEY', passwordVariable: 'MINIO_SECRET_KEY'),
+                    usernamePassword(credentialsId: OBJECT_STORAGE_CREDENTIALS_ID, usernameVariable: 'OBJECT_STORAGE_ACCESS_KEY', passwordVariable: 'OBJECT_STORAGE_SECRET_KEY'),
                 ]) {
                     sh '''
                         set -e
                         ansible-playbook playbooks/backup_and_verify.yml \
                           -e gitlab_url="$GITLAB_URL" \
                           -e gitlab_token="$GITLAB_TOKEN" \
-                          -e minio_endpoint="$MINIO_ENDPOINT" \
-                          -e minio_access_key="$MINIO_ACCESS_KEY" \
-                          -e minio_secret_key="$MINIO_SECRET_KEY" \
+                          -e object_storage_endpoint="$OBJECT_STORAGE_ENDPOINT" \
+                          -e object_storage_access_key="$OBJECT_STORAGE_ACCESS_KEY" \
+                          -e object_storage_secret_key="$OBJECT_STORAGE_SECRET_KEY" \
                           -e gitlab_backup_retention_days="$BACKUP_RETENTION_DAYS" \
                           -e gitlab_restore_teardown="$([ "$KEEP_RESTORE_FOR_INSPECTION" = "true" ] && echo false || echo true)"
                     '''

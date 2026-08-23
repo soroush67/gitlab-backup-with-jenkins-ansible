@@ -1,0 +1,70 @@
+services:
+  rustfs-volume-init:
+    # rustfs/rustfs runs as a non-root user (uid 10001) - confirmed via
+    # `docker run --entrypoint /bin/sh rustfs/rustfs id rustfs`. Fresh named
+    # Docker volumes are created owned by root:root, which that user can't
+    # write to (hit for real: "[FATAL] ... Io error: Permission denied
+    # (os error 13)", crash-looping on every start). This one-shot init
+    # container chowns them before rustfs itself ever starts.
+    image: busybox:latest
+    command: chown -R 10001:10001 /data/rustfs0 /data/rustfs1 /data/rustfs2 /data/rustfs3 /app/logs
+    volumes:
+      - rustfs-data-0:/data/rustfs0
+      - rustfs-data-1:/data/rustfs1
+      - rustfs-data-2:/data/rustfs2
+      - rustfs-data-3:/data/rustfs3
+      - rustfs-logs:/app/logs
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: gitlab-backup-rustfs
+    security_opt:
+      - "no-new-privileges:true"
+    restart: unless-stopped
+    depends_on:
+      rustfs-volume-init:
+        condition: service_completed_successfully
+    environment:
+      RUSTFS_VOLUMES: "/data/rustfs{0...3}"
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      # SECURITY: these defaults are public and well-known - set real values
+      # in .env before exposing this beyond localhost.
+      RUSTFS_ACCESS_KEY: "${RUSTFS_ACCESS_KEY:-gitlabbackup}"
+      RUSTFS_SECRET_KEY: "${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env - see .env.example}"
+      RUSTFS_OBS_LOGGER_LEVEL: "info"
+      # This host has a single physical disk, so the 4 data volumes below
+      # can't satisfy RustFS's erasure-coding "distinct physical disks"
+      # check. Only bypass this on single-disk boxes; remove it on real
+      # multi-disk hardware. Same setting already relied on in the
+      # kubespray-webui project's own RustFS service.
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    volumes:
+      - rustfs-data-0:/data/rustfs0
+      - rustfs-data-1:/data/rustfs1
+      - rustfs-data-2:/data/rustfs2
+      - rustfs-data-3:/data/rustfs3
+      - rustfs-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 40s
+
+volumes:
+  rustfs-data-0:
+    name: gitlab-backup-rustfs-data-0
+  rustfs-data-1:
+    name: gitlab-backup-rustfs-data-1
+  rustfs-data-2:
+    name: gitlab-backup-rustfs-data-2
+  rustfs-data-3:
+    name: gitlab-backup-rustfs-data-3
+  rustfs-logs:
+    name: gitlab-backup-rustfs-logs

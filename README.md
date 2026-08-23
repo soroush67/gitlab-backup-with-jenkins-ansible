@@ -5,7 +5,7 @@ Ansible automation, scheduled by Jenkins, that:
 1. Backs up every project on a GitLab instance via GitLab's own
    [Project Export API](https://docs.gitlab.com/ee/api/project_import_export.html)
    (repo + issues + MRs + wiki + CI config + settings, not just git data).
-2. Uploads the backup to object storage (MinIO/S3-compatible), with a
+2. Uploads the backup to object storage (RustFS/S3-compatible), with a
    retention window (10-30 days, adjustable per run) that prunes anything
    older on every run.
 3. Proves each backup is actually restorable by importing it into a
@@ -23,9 +23,9 @@ docker-compose.gitlab-source.yml   - throwaway source GitLab (dev/testing only -
 docker-compose.gitlab-restore.yml  - disposable per-run restore-verification target,
                                       spun up by gitlab_restore_test, torn down unless
                                       KEEP_RESTORE_FOR_INSPECTION is set
-docker-compose.minio.yml           - throwaway object storage (dev/testing only -
-                                      point minio_endpoint at a real one for real use)
-.env.example                       - template for docker-compose.minio.yml's bootstrap
+docker-compose.rustfs.yml          - throwaway object storage (dev/testing only -
+                                      point object_storage_endpoint at a real one for real use)
+.env.example                       - template for docker-compose.rustfs.yml's bootstrap
                                       credentials (copy to .env, gitignored)
 roles/gitlab_backup/                - lists projects, exports, downloads, writes manifest.json
 roles/gitlab_backup_upload/         - uploads the run's backup to object storage, prunes old ones
@@ -64,11 +64,11 @@ backups/<timestamp>/               - one directory per run: *.tar.gz exports + m
   against a genuine multi-project instance) with no error unless you
   check the count. The role checks the token's admin status up front and
   fails with a clear message if it isn't one.
-- **An access key/secret key for a MinIO/S3-compatible object storage
-  endpoint** (`minio_access_key`/`minio_secret_key`, or the Jenkins
-  `minio-credentials` credential) - required even for `backup.yml` alone,
+- **An access key/secret key for a RustFS/S3-compatible object storage
+  endpoint** (`object_storage_access_key`/`object_storage_secret_key`, or the Jenkins
+  `object-storage-credentials` credential) - required even for `backup.yml` alone,
   since upload is on by default (`gitlab_backup_upload_enabled: true`; set
-  to `false` to skip it for a quick local-only test with no MinIO
+  to `false` to skip it for a quick local-only test with no object storage
   running).
 
 ## Usage
@@ -78,27 +78,27 @@ backups/<timestamp>/               - one directory per run: *.tar.gz exports + m
 ansible-playbook playbooks/backup.yml \
   -e gitlab_url=http://your-gitlab:port \
   -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx \
-  -e minio_endpoint=http://your-minio:port \
-  -e minio_access_key=... -e minio_secret_key=... \
+  -e object_storage_endpoint=http://your-object-storage:port \
+  -e object_storage_access_key=... -e object_storage_secret_key=... \
   -e gitlab_backup_retention_days=30
 
 # backup + upload + prove it's restorable (spins up + tears down a disposable GitLab CE)
 ansible-playbook playbooks/backup_and_verify.yml \
   -e gitlab_url=http://your-gitlab:port \
   -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx \
-  -e minio_endpoint=http://your-minio:port \
-  -e minio_access_key=... -e minio_secret_key=... \
+  -e object_storage_endpoint=http://your-object-storage:port \
+  -e object_storage_access_key=... -e object_storage_secret_key=... \
   -e gitlab_backup_retention_days=30
 
 # same, but leave the restore instance running afterward for manual inspection
 # (prints URL/username/password at the end - see "Manual inspection" below)
 ansible-playbook playbooks/backup_and_verify.yml \
   -e gitlab_url=http://your-gitlab:port -e gitlab_token=glpat-xxxxxxxxxxxxxxxxxxxx \
-  -e minio_access_key=... -e minio_secret_key=... \
+  -e object_storage_access_key=... -e object_storage_secret_key=... \
   -e gitlab_restore_teardown=false
 ```
 
-`gitlab_token`/`minio_access_key`/`minio_secret_key` can also come from env
+`gitlab_token`/`object_storage_access_key`/`object_storage_secret_key` can also come from env
 vars (see `inventory/group_vars/all.yml`) - what the Jenkins pipeline uses
 via `withCredentials` bindings, so nothing sensitive appears in a build
 parameter or shell history. In Jenkins, `KEEP_RESTORE_FOR_INSPECTION` and
@@ -152,46 +152,80 @@ in this project assumes the throwaway instance.
 
 ## Development/testing object storage
 
-This repo also ships its own throwaway MinIO (`docker-compose.minio.yml`)
-for developing/testing the upload/retention step without a real object
-storage endpoint:
+This repo also ships its own throwaway RustFS (`docker-compose.rustfs.yml`,
+same image/config already relied on in the kubespray-webui project's own
+etcd-backup service) for developing/testing the upload/retention step
+without a real object storage endpoint:
 
 ```bash
-cp .env.example .env   # then edit MINIO_ROOT_PASSWORD to a real secret
-docker-compose -f docker-compose.minio.yml up -d
+cp .env.example .env   # then edit RUSTFS_SECRET_KEY to a real secret
+docker-compose -f docker-compose.rustfs.yml up -d
 ```
 
-Data lives in a named volume (`gitlab-backup-minio-data`) the same way
-`gitlab-source`'s does - stop/restart keeps it. Point
-`minio_endpoint`/`minio_access_key`/`minio_secret_key` at this instance
-(`http://localhost:9010`, credentials from `.env`) to test end-to-end.
-Swap in a real MinIO/S3-compatible endpoint for production use.
+Data lives in named volumes (`gitlab-backup-rustfs-data-0..3`, `-logs`)
+the same way `gitlab-source`'s does - stop/restart keeps it. Point
+`object_storage_endpoint`/`object_storage_access_key`/`object_storage_secret_key`
+at this instance (`http://localhost:9010`, credentials from `.env`) to
+test end-to-end. Uploads go through the `minio/mc` CLI image either way -
+"MinIO Client" is a generic S3-compatible client, not tied to a MinIO
+backend, so nothing else changes when pointing it at RustFS instead. Swap
+in a real RustFS/S3-compatible endpoint for production use.
 
 ## Verification status
 
 `playbooks/backup_and_verify.yml` run for real end-to-end against the
-throwaway source instance (10 test projects, each with a real commit),
-with object storage upload and manual-inspection both enabled: backup
-exported/downloaded/uploaded all 10 to MinIO, the restore role imported
-all 10 into a genuinely fresh disposable GitLab CE, and verification
-confirmed real repository content (an actual branch + commit, not just
-`import_status: finished`) for all 10 -
-`RESTORE VERIFICATION PASSED - all 10 project(s) restored correctly.`,
-`failed=0` in the play recap. Also confirmed for real: the uploaded
-objects actually exist in the MinIO bucket; the generated root password
-is genuinely valid (`User#valid_password?` checked directly, not just
-"the task didn't error"); retention pruning both removes objects/local
-directories older than the window and leaves recent ones untouched
-(tested both directions, not just the delete path); and with
-`gitlab_restore_teardown: false` the restore instance is correctly left
-running with connection info printed instead of torn down. Eight real
-bugs were found and fixed getting the whole pipeline working (six before
-this feature set - see below - plus two more building object storage
-upload: `mc cp --recursive`'s trailing-slash nesting quirk, and the
-`docker info` access check needing to cover this role too, not just
-restore-verify).
+throwaway source instance, including group and nested-group projects (12
+total: 10 user-owned + 1 single-level group + 1 three-level-deep nested
+group), with RustFS object storage upload enabled: backup
+exported/downloaded/uploaded all 12, the restore role recreated the group
+structure (including the nested one, independently confirmed via the API
+afterward) and imported all 12 into a genuinely fresh disposable GitLab
+CE, and verification confirmed real repository content (an actual branch
++ commit, not just `import_status: finished`) for all 12 -
+`RESTORE VERIFICATION PASSED - all 12 project(s) restored correctly.`,
+`failed=0` in the play recap. Also confirmed for real, in earlier runs of
+the same pipeline: the generated root password is genuinely valid
+(`User#valid_password?` checked directly, not just "the task didn't
+error"); retention pruning both removes objects/local directories older
+than the window and leaves recent ones untouched (tested both directions,
+not just the delete path); with `gitlab_restore_teardown: false` the
+restore instance is correctly left running with connection info printed
+instead of torn down; and a genuinely stale, already-populated restore
+instance from a prior run gets torn down and replaced with a fresh one
+instead of silently reused. Eleven real bugs were found and fixed getting
+the whole pipeline working - see "Design notes" below for each one,
+including the RustFS volume-ownership crash-loop (fresh named Docker
+volumes default to root:root, but the image runs as uid 10001 - fixed
+with a one-shot `chown` init container ahead of RustFS itself) found
+while switching object storage backends from the original MinIO to
+RustFS.
 
 ## Design notes
+
+**Why RustFS instead of MinIO for the throwaway dev/test object storage**:
+switched on request - RustFS is already relied on elsewhere in this same
+environment (the kubespray-webui project's etcd-backup service), so
+reusing it here keeps the two projects' operational knowledge shared.
+`minio/mc` ("MinIO Client") is unaffected by which backend it talks to -
+it's a generic S3-compatible client, not tied to a MinIO server - so
+`roles/gitlab_backup_upload`'s upload/prune logic didn't need to change,
+only the variable names (`minio_*` → `object_storage_*`, since they no
+longer imply a specific backend) and `docker-compose.minio.yml` →
+`docker-compose.rustfs.yml`.
+
+**RustFS crash-loops on fresh named Docker volumes with "Permission
+denied"**: hit immediately on first boot after the MinIO → RustFS switch -
+`[FATAL] Server encountered an error and is shutting down: Io error:
+Permission denied (os error 13)`, repeating forever. Root-caused directly:
+`docker run --entrypoint /bin/sh rustfs/rustfs id rustfs` showed the image
+runs as a non-root user (uid/gid 10001), but a freshly created named
+Docker volume is owned by `root:root` by default - confirmed on disk
+(`ls -la` on the volume's mountpoint under `/var/lib/docker/volumes/`).
+Fixed with a one-shot `rustfs-volume-init` service (`busybox` + `chown -R
+10001:10001`) that `depends_on: ... condition: service_completed_successfully`
+gates the real `rustfs` service behind - runs once per fresh volume set,
+harmless (and fast) to re-run against already-correctly-owned volumes on
+a normal restart.
 
 **A stale restore instance from a previous `gitlab_restore_teardown: false`
 run could get silently reused**: hit for real via the actual Jenkins
@@ -260,7 +294,7 @@ would grow unbounded across scheduled runs even though the bucket stays
 bounded. Uses `ansible.builtin.find`'s `age` filter (`recurse: false`, so
 it only considers the immediate `backups/<timestamp>/` directories, never
 descends into what's inside them) with the same
-`gitlab_backup_retention_days` window MinIO's own `mc rm --older-than`
+`gitlab_backup_retention_days` window RustFS's own `mc rm --older-than`
 uses - tested both directions directly (a deliberately-backdated fake old
 run directory got removed; a recent one and the current run's own
 directory did not).

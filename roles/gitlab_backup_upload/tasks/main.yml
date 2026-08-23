@@ -1,10 +1,10 @@
 ---
-- name: Assert MinIO credentials are set
+- name: Assert object storage credentials are set
   assert:
     that:
-      - minio_access_key | length > 0
-      - minio_secret_key | length > 0
-    msg: "minio_access_key/minio_secret_key must be set (-e or a Jenkins credential binding) to upload backups to object storage."
+      - object_storage_access_key | length > 0
+      - object_storage_secret_key | length > 0
+    msg: "object_storage_access_key/object_storage_secret_key must be set (-e or a Jenkins credential binding) to upload backups to object storage."
 
 - name: Assert retention days is in the supported range
   assert:
@@ -32,14 +32,17 @@
       restart whatever process runs this playbook.
 
 - name: Set the mc alias env var used by every mc invocation below
+  # minio/mc ("MinIO Client") is a generic S3-compatible client, not tied
+  # to a MinIO backend - works against RustFS (this project's default) or
+  # any other S3-compatible endpoint the same way.
   set_fact:
-    gitlab_mc_host_env: "MC_HOST_local=http://{{ minio_access_key }}:{{ minio_secret_key }}@{{ minio_endpoint | regex_replace('^https?://', '') }}"
+    gitlab_mc_host_env: "MC_HOST_local=http://{{ object_storage_access_key }}:{{ object_storage_secret_key }}@{{ object_storage_endpoint | regex_replace('^https?://', '') }}"
 
 - name: Ensure the backups bucket exists
   command: >-
     docker run --rm --network host
     -e {{ gitlab_mc_host_env }}
-    minio/mc:latest mb --ignore-existing local/{{ minio_bucket }}
+    minio/mc:latest mb --ignore-existing local/{{ object_storage_bucket }}
   changed_when: true
 
 - name: Upload this run's backup to object storage
@@ -52,14 +55,14 @@
     docker run --rm --network host
     -v {{ gitlab_backup_run_dir }}:/upload:ro
     -e {{ gitlab_mc_host_env }}
-    minio/mc:latest cp --recursive /upload/ local/{{ minio_bucket }}/{{ gitlab_backup_run_dir | basename }}/
+    minio/mc:latest cp --recursive /upload/ local/{{ object_storage_bucket }}/{{ gitlab_backup_run_dir | basename }}/
   register: gitlab_backup_upload_result
 
 - name: Prune backups older than the retention window
   command: >-
     docker run --rm --network host
     -e {{ gitlab_mc_host_env }}
-    minio/mc:latest rm --recursive --force --older-than {{ gitlab_backup_retention_days }}d local/{{ minio_bucket }}/
+    minio/mc:latest rm --recursive --force --older-than {{ gitlab_backup_retention_days }}d local/{{ object_storage_bucket }}/
   register: gitlab_backup_prune_result
   changed_when: "'Removed' in gitlab_backup_prune_result.stdout"
   failed_when: false
@@ -67,8 +70,8 @@
 - name: Report upload complete
   debug:
     msg: >-
-      Uploaded backup to {{ minio_bucket }}/{{ gitlab_backup_run_dir | basename }}/
-      on {{ minio_endpoint }} (retention: {{ gitlab_backup_retention_days }} days).
+      Uploaded backup to {{ object_storage_bucket }}/{{ gitlab_backup_run_dir | basename }}/
+      on {{ object_storage_endpoint }} (retention: {{ gitlab_backup_retention_days }} days).
 
 - name: Prune local backup run directories older than the same retention window
   # Object storage is the durable copy - local backups/<timestamp>/ is just
