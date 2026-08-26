@@ -58,6 +58,88 @@
     minio/mc:latest cp --recursive /upload/ local/{{ object_storage_bucket }}/{{ gitlab_backup_run_dir | basename }}/
   register: gitlab_backup_upload_result
 
+- name: Read the backup manifest (drives per-project server-side export cleanup)
+  set_fact:
+    gitlab_manifest: "{{ lookup('file', gitlab_backup_run_dir ~ '/manifest.json') | from_json }}"
+  when: gitlab_export_cleanup_enabled | bool
+
+- name: Check the GitLab container can be reached for server-side export cleanup
+  command: "docker exec {{ gitlab_export_cleanup_container }} true"
+  delegate_to: "{{ gitlab_export_cleanup_host }}"
+  register: gitlab_export_cleanup_check
+  changed_when: false
+  failed_when: false
+  when: gitlab_export_cleanup_enabled | bool
+
+- name: Fail cleanly if the GitLab container for cleanup isn't reachable
+  assert:
+    that: gitlab_export_cleanup_check.rc == 0
+    msg: >-
+      Can't `docker exec` into {{ gitlab_export_cleanup_container }} on
+      {{ gitlab_export_cleanup_host }} to clean up server-side exports:
+      {{ gitlab_export_cleanup_check.stderr }}. Set gitlab_export_cleanup_enabled: false
+      to skip this step, or fix gitlab_export_cleanup_container/gitlab_export_cleanup_host.
+  when: gitlab_export_cleanup_enabled | bool
+
+- name: Delete each project's server-side export now that it's safely uploaded
+  # Two genuinely separate storage mechanisms feed the same
+  # import_export/ directory on disk - both were confirmed live
+  # (gitlab-rails runner) against this exact GitLab version, and both
+  # needed real trial and error to get right:
+  #
+  # 1. The classic whole-archive export - Project itself has no direct
+  #    export_file accessor; it's a has_many :import_export_uploads
+  #    (Project#import_export_upload, singular, doesn't exist - raised
+  #    "undefined method" the first time this was tried). Each row's
+  #    export_file is a CarrierWave-mounted, NULLABLE column - cleared
+  #    with remove_export_file! (the CarrierWave-generated bang method)
+  #    + save!, NOT update!(export_file: nil): confirmed live that
+  #    assigning nil directly to a mounted column is a silent no-op
+  #    (CarrierWave's writer only caches new files; nil isn't treated as
+  #    "remove"), so that update! "succeeded" but left the file and row
+  #    completely untouched.
+  #
+  # 2. The newer per-relation export pipeline (what actually produces the
+  #    relation_export_upload/ files reported alongside the classic ones
+  #    in the original incident, e.g. releases.tar.gz, merge_requests.tar.gz)
+  #    - reached via Project#export_jobs -> each ProjectExportJob's
+  #    relation_exports -> each one's upload
+  #    (Projects::ImportExport::RelationExportUpload). This table's
+  #    export_file column is NOT NULL (confirmed live: remove_export_file!
+  #    + save! here raises PG::NotNullViolation) - the row itself, not
+  #    just the file, is meant to go away, via plain .destroy. Confirmed
+  #    live this removes both the DB row and the on-disk file (WithUploads'
+  #    own doc comment: "mounted uploaders are destroyed by carrierwave's
+  #    after_commit hook"). This is also the table that had ~750 leftover
+  #    rows for a single project on this dev instance alone before this
+  #    role's fix went in - the real scale of what accumulates without it.
+  #
+  # Both together, not a raw `rm` on either - keeps GitLab's own DB state
+  # in sync with storage (works the same whether storage is local disk
+  # today or S3-compatible object storage if uploads_object_store gets
+  # enabled later) instead of leaving rows pointing at files that no
+  # longer exist. Clears every row, not just the latest - a project
+  # exported more than once before cleanup ever ran (exactly what caused
+  # the original incident) can have several. RecordNotFound is treated as
+  # already-clean, not a failure - a project deleted between backup and
+  # this step has nothing left to clean up.
+  command: >-
+    docker exec {{ gitlab_export_cleanup_container }} gitlab-rails runner
+    "begin; p = Project.find({{ item.id | int }}); p.import_export_uploads.where.not(export_file: [nil, '']).find_each { |u| u.remove_export_file!; u.save! }; p.export_jobs.each { |job| job.relation_exports.each { |re| u = re.upload; u.destroy if u } }; puts 'EXPORT_CLEANUP_OK'; rescue ActiveRecord::RecordNotFound; puts 'EXPORT_CLEANUP_OK_SKIPPED_NOT_FOUND'; end"
+  delegate_to: "{{ gitlab_export_cleanup_host }}"
+  register: gitlab_export_cleanup_result
+  changed_when: false
+  failed_when: "'EXPORT_CLEANUP_OK' not in gitlab_export_cleanup_result.stdout"
+  loop: "{{ gitlab_manifest }}"
+  loop_control:
+    label: "{{ item.path_with_namespace }}"
+  when: gitlab_export_cleanup_enabled | bool
+
+- name: Report server-side export cleanup complete
+  debug:
+    msg: "Cleaned up server-side export files for {{ gitlab_manifest | length }} project(s) on {{ gitlab_export_cleanup_container }}."
+  when: gitlab_export_cleanup_enabled | bool
+
 - name: Prune backups older than the retention window
   command: >-
     docker run --rm --network host

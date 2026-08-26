@@ -28,7 +28,9 @@ docker-compose.rustfs.yml          - throwaway object storage (dev/testing only 
 .env.example                       - template for docker-compose.rustfs.yml's bootstrap
                                       credentials (copy to .env, gitignored)
 roles/gitlab_backup/                - lists projects, exports, downloads, writes manifest.json
-roles/gitlab_backup_upload/         - uploads the run's backup to object storage, prunes old ones
+roles/gitlab_backup_upload/         - uploads the run's backup to object storage, prunes old ones,
+                                       and deletes each project's server-side export on GitLab
+                                       itself once the upload succeeds (see "Design notes")
 roles/gitlab_restore_test/          - imports the manifest's backups into a throwaway
                                        GitLab, verifies, tears down (or not)
 playbooks/backup.yml               - backup + upload, no restore-verify
@@ -367,6 +369,72 @@ passed or failed. The random root password
 and only ever appears in that run's console output - confirmed genuinely
 valid directly via `User#valid_password?`, not just "the task didn't
 error."
+
+**Server-side export files are cleaned up after upload, via `gitlab-rails
+runner`, not left to GitLab's own expiry**: reported directly from a real
+production incident - a `no space left on device` outage on the actual
+GitLab host, traced to
+`gitlab-rails/uploads/-/system/projects/import_export` filling up (~23G)
+from every project this job had ever exported, because nothing ever
+deletes the server-side export once downloaded. GitLab's Project Export
+API has no REST endpoint to force this - the file otherwise sits until
+GitLab's own internal expiry (`ProjectExportJob::EXPIRES_IN = 7.days`,
+confirmed by reading the model source directly inside the container - not
+the ~24h commonly assumed) runs, which is far longer than this job's own
+nightly cadence, so the files pile up run over run. `roles/gitlab_backup_upload`
+now deletes each project's server-side export - both of them, two
+genuinely separate mechanisms landing in the same directory:
+
+1. The classic whole-archive export: `Project#import_export_uploads`
+   (has_many, NOT `#import_export_upload` singular - that raised
+   "undefined method" the first time this was tried against this exact
+   GitLab version), a nullable CarrierWave-mounted `export_file` column.
+   Cleared with the CarrierWave-generated `remove_export_file!` bang
+   method + `save!` - confirmed directly that `update!(export_file: nil)`
+   is a silent no-op instead (CarrierWave's writer only caches *new*
+   files; a bare `nil` isn't treated as "remove"), so that first attempt
+   printed no error and left the file and DB row completely untouched.
+2. The newer per-relation export pipeline (`Project#export_jobs` ->
+   each `ProjectExportJob`'s `relation_exports` -> each one's
+   `Projects::ImportExport::RelationExportUpload` - what actually
+   produces the `relation_export_upload/` files, e.g.
+   `merge_requests.tar.gz`, `releases.tar.gz`, seen alongside the classic
+   ones in the original incident). This table's `export_file` column is
+   **NOT NULL** - confirmed directly that `remove_export_file!` + `save!`
+   here raises `PG::NotNullViolation` instead. The row itself has to go,
+   via plain `.destroy` - confirmed directly this removes both the DB row
+   and the on-disk file (`WithUploads`' own doc comment: "mounted
+   uploaders are destroyed by carrierwave's after_commit hook"). This
+   table is also where the real accumulated scale showed up: ~750
+   leftover rows for a *single* project on this project's own dev
+   instance alone, purely from iterative development/testing of this
+   pipeline before this cleanup existed.
+
+Runs only after upload to object storage succeeds (same "never touch
+something that isn't safely offsite yet" ordering the retention-prune
+tasks below already follow), via `docker exec <container> gitlab-rails
+runner ...` - requires Docker/SSH access to whatever host actually runs
+the GitLab container (`gitlab_export_cleanup_container`/
+`gitlab_export_cleanup_host`, defaulting to this project's own
+`gitlab-source` dev instance on `localhost`; point at the real production
+host for real use). Set `gitlab_export_cleanup_enabled: false` to skip
+entirely. Verified for real: full 12-project runs against the throwaway
+dev instance, confirming both the DB rows (`ImportExportUpload`/
+`RelationExportUpload`) and the actual files on disk are gone after each
+run, and that the total size of
+`gitlab-rails/uploads/-/system/projects/import_export` stays flat across
+repeated runs instead of growing run over run. One more thing confirmed
+directly while verifying this, not fixable by this job or by GitLab's own
+API at all: retroactively cleaning up this dev instance's own
+pre-existing backlog (accumulated over its whole development history)
+dropped the directory from 57M to 31M, not to 0 - the remaining 31M is
+real files on disk with **zero** matching DB rows in either table
+(orphaned, likely from interrupted/failed jobs during iterative testing
+of this very pipeline). No DB-driven cleanup - this job's or GitLab's own
+internal worker - can ever reach files GitLab's own database no longer
+references; only filesystem-level cleanup while GitLab is stopped (what
+was actually done to resolve the original production incident) reaches
+those.
 
 **Project listing requires an admin token - `membership=true` silently
 under-lists**: the first real production run (against a genuine

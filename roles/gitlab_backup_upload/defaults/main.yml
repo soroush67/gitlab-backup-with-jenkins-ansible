@@ -20,3 +20,25 @@ gitlab_backup_retention_days: 30
 # duplicated (not relied on via cross-role variable bleed) so this role
 # stays correct even if run order or role composition ever changes.
 gitlab_backup_dir: "{{ playbook_dir }}/../backups"
+
+# Delete each project's server-side export file on the GitLab host itself
+# (via `docker exec ... gitlab-rails runner`) once this run's backup has
+# been uploaded to object storage. GitLab's Project Export API has no REST
+# endpoint to force this - the file otherwise lingers until GitLab's own
+# internal expiry worker runs, hours later, and does so for EVERY project
+# this job has ever exported, not just this run's, which is what filled
+# /var/opt/gitlab in the first place at real scale. Runs only after upload
+# succeeds - same "never touch something that isn't safely offsite yet"
+# ordering the local run-dir prune below already follows. See README
+# "Design notes" for why this uses update!(export_file: nil) on the
+# CarrierWave-mounted column instead of a raw `rm` on the file.
+gitlab_export_cleanup_enabled: true
+# Name of the GitLab container to `docker exec` into. Defaults to this
+# project's own throwaway gitlab-source dev instance.
+gitlab_export_cleanup_container: "gitlab-source"
+# Host `docker exec` runs on - the box actually running the GitLab
+# container. Defaults to localhost, true for this project's dev instance
+# (Ansible and gitlab-source share a host) - point this at the real
+# production GitLab host (added to inventory with SSH access) for real
+# deployments where GitLab doesn't run on the same box as Ansible/Jenkins.
+gitlab_export_cleanup_host: "localhost"
